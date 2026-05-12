@@ -1,0 +1,7 @@
+*.xlsx
+*.xls
+*.zip
+*.rar
+__pycache__/
+outputs/
+reports/
