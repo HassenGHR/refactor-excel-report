@@ -32,6 +32,27 @@ The scripts support various Excel report formats from different rigs:
 - TP-195
 - ENF-17
 
+## Project Structure
+
+```
+.
+├── extractors/                 # Extraction scripts for different report formats
+│   ├── __init__.py
+│   ├── ddr_extract.py          # General DDR extraction
+│   ├── enf04_extract.py        # ENF04 format extraction
+│   ├── gw29_extract.py         # GW29 format extraction
+│   ├── parse_source.py         # Format detection and dispatcher
+│   ├── tp173_extract.py        # TP-173 format extraction
+│   ├── tp179_extract.py        # TP-179 format extraction
+│   ├── tp182_extract.py        # TP-182 format extraction
+│   └── tp195_extract.py        # TP-195 format extraction
+├── batch_to_router_excel.py    # Batch processing multiple files
+├── to_router_excel.py          # Single file processing
+├── .gitignore
+├── README.md
+└── requirements.txt
+```
+
 ## Requirements
 
 See requirements.txt for dependencies.
