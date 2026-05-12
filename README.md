@@ -38,7 +38,7 @@ The scripts support various Excel report formats from different rigs:
 .
 ├── extractors/                 # Extraction scripts for different report formats
 │   ├── __init__.py
-│   ├── ddr_extract.py          # General DDR extraction
+│   ├── enf17_extract.py          # ENF17 format extraction
 │   ├── enf04_extract.py        # ENF04 format extraction
 │   ├── gw29_extract.py         # GW29 format extraction
 │   ├── parse_source.py         # Format detection and dispatcher

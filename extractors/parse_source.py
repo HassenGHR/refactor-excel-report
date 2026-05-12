@@ -96,8 +96,8 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
     """Detect the source format and call the right extractor."""
     fmt = _detect_format(source)
     if fmt == "enf":
-        from .ddr_extract import parse_ddr
-        data = parse_ddr(source)
+        from .enf17_extract import parse_enf17
+        data = parse_enf17(source)
     elif fmt == "tp179":
         from .tp179_extract import parse_tp179
         data = parse_tp179(source)
