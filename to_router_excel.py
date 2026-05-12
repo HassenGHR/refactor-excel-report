@@ -29,7 +29,7 @@ from pathlib import Path
 from openpyxl import Workbook
 
 # Re-use the source extractor from ddr_extract.py (must be in same folder)
-from parse_source import parse_source as parse_ddr
+from extractors.parse_source import parse_source as parse_ddr
 
 
 # Non-chemical keywords from excel_import_service._extract_mud_chemicals.

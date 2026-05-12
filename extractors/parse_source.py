@@ -96,25 +96,25 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
     """Detect the source format and call the right extractor."""
     fmt = _detect_format(source)
     if fmt == "enf":
-        from ddr_extract import parse_ddr
+        from .ddr_extract import parse_ddr
         data = parse_ddr(source)
     elif fmt == "tp179":
-        from tp179_extract import parse_tp179
+        from .tp179_extract import parse_tp179
         data = parse_tp179(source)
     elif fmt == "tp173":
-        from tp173_extract import parse_tp173
+        from .tp173_extract import parse_tp173
         data = parse_tp173(source)
     elif fmt == "tp182":
-        from tp182_extract import parse_tp182
+        from .tp182_extract import parse_tp182
         data = parse_tp182(source)
     elif fmt == "tp195":
-        from tp195_extract import parse_tp195
+        from .tp195_extract import parse_tp195
         data = parse_tp195(source)
     elif fmt == "gw29":
-        from gw29_extract import parse_gw29
+        from .gw29_extract import parse_gw29
         data = parse_gw29(source)
     elif fmt == "enf04":
-        from enf04_extract import parse_enf04
+        from .enf04_extract import parse_enf04
         data = parse_enf04(source)
     else:
         raise ValueError(
