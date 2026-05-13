@@ -404,17 +404,26 @@ def parse_tp195(source: Union[Path, str, BytesIO]) -> dict:
         end   = _cell(ws, row, 3, L)
         hrs   = _cell(ws, row, 4, L)
         desc  = _clean(_cell(ws, row, 5, L) or "")
-        bill  = _clean(_cell(ws, row, 15, L) or "")
+        bill_raw = _clean(_cell(ws, row, 15, L) or "")
         comp  = _clean(_cell(ws, row, 16, L) or "")
 
-        if not bill and not desc:
+        if not bill_raw and not desc:
             continue
         # Real ops have a BILL code
-        if not bill:
+        if not bill_raw:
             continue
         # Skip summary lines
         if any(t in desc.upper() for t in ("T1=", "T2=", "T3=")):
             continue
+
+        # Normalize bill code: this template stores values like "1,05xT1"
+        # (meaning "1.05 multiplier × T1 hourly rate").  The insert function
+        # looks for the strict pattern ^T(\d+)$ to set tValue, so we strip
+        # any leading multiplier and keep only the T-letter.  The
+        # multiplier itself isn't used by the cost calculator — the rig's
+        # ValueRig/ValueRigV2 tariff already encodes the applicable rate.
+        m = re.search(r"T\s*(\d+)", bill_raw, re.IGNORECASE)
+        bill = f"T{m.group(1)}" if m else bill_raw
 
         start_t = _time_parse(start)
         end_t   = _time_parse(end)
