@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 # Import the processing functions
-from extractors.parse_source import parse_source as parse_ddr
+from helpers.parse_source import parse_source as parse_ddr
 from to_router_excel import build_router_excel
 
 

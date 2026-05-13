@@ -1,7 +1,7 @@
 """
 enf17_extract.py — Extract structured data from an ENF17 Daily Drilling Report.
 
-Replaces the template-based conversion in ddr_to_workover.py with a clean
+Replaces the template-based conversion in enf17_to_workover.py with a clean
 data-only extraction. Output is a dict that matches the format expected by
 insert_parsed_report() — the same structure that
 `excel_import_service.parse_daily_excel_report()` returns.
@@ -11,7 +11,7 @@ CLI:
 
 The script can also be imported and called programmatically:
 
-    from ddr_extract import parse_ddr
+    from enf17_extract import parse_ddr
     data = parse_ddr(Path("report.xlsx"))
     # data["header"]["well_name"]  -> 'TAOP#06'
     # data["activities"][0]["start_time"] -> datetime.time(0, 0)
@@ -614,6 +614,10 @@ def main(argv=None) -> int:
           f"{len(data['mud_checks'])} mud props | "
           f"safety: {data['safety']}")
     return 0
+
+
+# Alias for compatibility
+parse_ddr = parse_enf17
 
 
 if __name__ == "__main__":

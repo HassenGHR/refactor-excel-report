@@ -335,6 +335,17 @@ def parse_enf04(source: Union[Path, str, BytesIO]) -> dict:
     # No individual supervisor names on this template, so supervisor /
     # superintendent stay unset (per the two-supervisor convention).
 
+    # =====================================================================
+    # Back-assign the bill code(s) to each operation row.
+    #
+    # This template doesn't tag individual operations with T1/T2/T3/NR —
+    # only the daily totals at rows 64-67 know the breakdown.  We partition
+    # the ops into groups whose hours sum exactly to each T-bucket total.
+    # See bill_code_assign.assign_bill_codes for the algorithm.
+    # =====================================================================
+    from helpers.bill_code_assign import assign_bill_codes
+    activities = assign_bill_codes(activities, tarif_totals)
+
     wb.close()
 
     return {
