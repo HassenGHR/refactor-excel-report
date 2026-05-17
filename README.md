@@ -31,6 +31,7 @@ The scripts support various Excel and PDF report formats from different rigs:
 - GW29
 - TP-173
 - TP-182
+- TP-183
 - TP-195
 - ENF-17
 - ENF34 PDF
@@ -48,6 +49,7 @@ The scripts support various Excel and PDF report formats from different rigs:
 │   ├── tp173_extract.py        # TP-173 format extraction
 │   ├── tp179_extract.py        # TP-179 format extraction
 │   ├── tp182_extract.py        # TP-182 format extraction
+│   ├── tp183_extract.py        # TP-183 format extraction
 │   └── tp195_extract.py        # TP-195 format extraction
 ├── helpers/                    # Helper modules
 │   ├── bill_code_assign.py     # Bill code assignment logic
