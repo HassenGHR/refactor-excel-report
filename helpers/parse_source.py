@@ -101,6 +101,14 @@ def _detect_format_xlsx(source) -> str:
         or re.search(r"\bDDNH[-\s]?\d", blob)):
         return "enf04"
 
+    # TP-183 — ENTP rig 183, TMLS wells.  Different title from TP-173/TP-179
+    # ("RAPPORT JOURNALIER WORK OVER" — no "DE", no "DU") and uses a
+    # compact ~62-row single-sheet template with cost analysis.  Must be
+    # checked BEFORE both TP-173 (shares "DERNIER TUBAGE" label) AND GW29
+    # (shares "PARAMETRES" marker).
+    if "TP 183" in blob or "TP-183" in blob or re.search(r"\bTMLS\b", blob):
+        return "tp183"
+
     # GW-series rigs (GWDC operator, RBL wells, REB field) — French workover
     # format but with distinct AVANCEMENT/OUTILS/USURE/PARAMETRES layout.
     # Must be checked BEFORE the generic TP-179 catch-all below since GW29
@@ -219,12 +227,12 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
         from gw29_extract import parse_gw29
         data = parse_gw29(source)
     elif fmt == "enf04":
-        from extractors.enf04_extract import parse_enf04
+        from enf04_extract import parse_enf04
         data = parse_enf04(source)
 
     # PDF-backed extractors
     elif fmt == "enf34_pdf":
-        from extractors.enf34_pdf_extract import parse_enf34_pdf
+        from enf34_pdf_extract import parse_enf34_pdf
         data = parse_enf34_pdf(source)
 
     else:
