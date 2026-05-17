@@ -46,10 +46,19 @@ def assign_bill_codes(activities: List[Dict[str, Any]],
     Tag each activity with a "bill" key ('T1'/'T2'/'T3'/'T4') based on
     the per-code daily totals.  Mutates and returns `activities`.
 
+    If an activity already has a non-empty "bill" value, it is left
+    untouched — this lets callers run the helper unconditionally even on
+    sources that supply some or all per-op codes inline.
+
     Empty input or empty tarif_totals → no-op (returns activities
     unchanged with whatever "bill" they already have).
     """
     if not activities:
+        return activities
+
+    # Skip ops that already have a bill code — only fill in the gaps.
+    # This makes the helper safe to call unconditionally.
+    if all(a.get("bill", "").strip() for a in activities):
         return activities
 
     # Pull T-bucket hours in T1..T4 order, keeping only non-zero buckets
