@@ -180,44 +180,115 @@ def parse_enf04(source: Union[Path, str, BytesIO]) -> dict:
         header["well_objective"] = _clean(obj)
 
     # =====================================================================
-    # OPERATIONS  (rows 16-19; header at r15: Debut/Fin/Temp H/Chronologie)
+    # OPERATIONS  — auto-detect column layout
+    #
+    # Two flavors of this template are in circulation:
+    #   Layout A (older, 2026-05-10 sample):
+    #       Header row 15: B=Debut, C=Fin, D=Temp H, E=Chronologie
+    #       Ops:      r16+ in those same columns
+    #       Per-op bill codes: ABSENT (must back-assign from tarif totals)
+    #   Layout B (newer, 2026-05-16 sample):
+    #       Header row 17: A=DE, B=A, C=OPERATIONS (one column to the left)
+    #       Ops:      r18+ in those same columns
+    #       Per-op bill codes: PRESENT in col M, hours in col N
+    #
+    # We scan rows 13-18 looking for the header row, then read columns
+    # relative to where we found the start-time label.  Continuation rows
+    # (only description, no start time) are folded into the previous op's
+    # description rather than becoming their own zero-hour rows.  Per-op
+    # bill codes are read from col M when present; otherwise the code
+    # stays blank and gets filled later by bill_code_assign.
     # =====================================================================
     activities = []
-    for row in range(16, 34):     # generous range; stops at "Après Minuit" label
-        start = _cell(ws, row, 2, L)        # B
-        end   = _cell(ws, row, 3, L)        # C
-        hrs   = _cell(ws, row, 4, L)        # D
-        desc  = _clean(_cell(ws, row, 5, L) or "")     # E
+    ops_header_row = None
+    start_col = end_col = hours_col = desc_col = None
+    bill_col = 13            # col M — try this for both layouts; harmless if empty
 
-        # Stop at the "Après Minuit" / "Situation à 6H00" labels
-        if any(t in desc.upper() for t in ("APRÈS MINUIT", "SITUATION", "PRESSION:",
-                                            "OUTILS")):
+    for hr in range(13, 19):
+        for c in range(1, 8):
+            label = _clean(_cell(ws, hr, c, L) or "").upper()
+            if label in ("DE", "DEBUT", "DÉBUT"):
+                # Found the start-time label — adjacent columns are end / hours / desc
+                ops_header_row = hr
+                start_col = c
+                end_col   = c + 1
+                # Hours column may or may not be present (Layout B skips it).
+                # Detect by looking at what the column at c+2 contains: if it's
+                # short like "H" / "TEMP" / "T H" it's hours; if it's long
+                # like "OPERATIONS" / "CHRONOLOGIE" it's the description.
+                next_label = _clean(_cell(ws, hr, c + 2, L) or "").upper()
+                if next_label.startswith(("OPER", "CHRON", "DESCR")):
+                    # No hours column — description starts at c+2
+                    hours_col = None
+                    desc_col  = c + 2
+                else:
+                    hours_col = c + 2
+                    desc_col  = c + 3
+                break
+        if ops_header_row is not None:
             break
-        if not desc and start is None:
-            continue
 
-        start_t = _time_parse(start)
-        end_t   = _time_parse(end)
-        hours = _duration_hours(hrs)
-        if hours == 0.0 and start_t and end_t:
-            sm = start_t.hour * 60 + start_t.minute
-            em = end_t.hour * 60 + end_t.minute
-            if em == sm:    hours = 24.0
-            elif em > sm:   hours = (em - sm) / 60.0
-            else:           hours = (em + 1440 - sm) / 60.0
+    # Recognize valid bill codes only (Txx); anything else is either bleed
+    # from a merged description cell or junk we should ignore.
+    _BILL_RX = re.compile(r"^T\d+$", re.IGNORECASE)
 
-        activities.append({
-            "start_time": start_t,
-            "end_time":   end_t,
-            "hours":      hours,
-            "phase_name": "",
-            "code": "", "sub": "",
-            "description": desc,
-            "start_md": 0, "end_md": 0,
-            "npt": 0, "npt_detail": "",
-            "npt_company": "", "op_company": "",
-            "bill": "",        # this template doesn't tag per-row bill codes
-        })
+    if ops_header_row is not None:
+        for row in range(ops_header_row + 1, ops_header_row + 21):     # scan up to 20 op rows
+            start = _cell(ws, row, start_col, L)
+            end   = _cell(ws, row, end_col,   L)
+            hrs   = _cell(ws, row, hours_col, L) if hours_col else None
+            desc  = _clean(_cell(ws, row, desc_col, L) or "")
+
+            # Inline bill code (Layout B): col M.  Layout A leaves it
+            # blank (or has the description bleeding from a merged cell
+            # to the right) — we accept the value only if it looks like
+            # a real Txx code.
+            bill_raw = _clean(_cell(ws, row, bill_col, L) or "")
+            bill_inline = bill_raw.upper() if _BILL_RX.match(bill_raw) else ""
+
+            # Stop at the "Après Minuit" / "Situation" labels — those mark
+            # the end of the ops table
+            if any(t in desc.upper() for t in ("APRÈS MINUIT", "APRES MINUIT",
+                                                "SITUATION", "PRESSION:",
+                                                "OUTILS")):
+                break
+            if not desc and start is None and end is None:
+                continue
+
+            start_t = _time_parse(start)
+            end_t   = _time_parse(end)
+
+            if start_t is not None:
+                # New operation row.  Compute hours from start/end times
+                # FIRST — that's the source of truth.  Fall back to the
+                # explicit hours cell only when we can't derive from times
+                # (e.g. an unparseable end-time).
+                hours = 0.0
+                if start_t and end_t:
+                    sm = start_t.hour * 60 + start_t.minute
+                    em = end_t.hour * 60 + end_t.minute
+                    if em == sm:    hours = 24.0
+                    elif em > sm:   hours = (em - sm) / 60.0
+                    else:           hours = (em + 1440 - sm) / 60.0
+                if hours == 0.0 and hrs is not None:
+                    hours = _duration_hours(hrs)
+
+                activities.append({
+                    "start_time": start_t,
+                    "end_time":   end_t,
+                    "hours":      hours,
+                    "phase_name": "",
+                    "code": "", "sub": "",
+                    "description": desc,
+                    "start_md": 0, "end_md": 0,
+                    "npt": 0, "npt_detail": "",
+                    "npt_company": "", "op_company": "",
+                    "bill": bill_inline,   # may be "" — back-filled later
+                })
+            elif desc and activities:
+                # Continuation row — fold this description into the previous op
+                prev = activities[-1]
+                prev["description"] = (prev["description"] + "\n" + desc).strip()
 
     # =====================================================================
     # AFTER MIDNIGHT  (rows 35-48 — usually empty on this template)

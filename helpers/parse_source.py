@@ -90,10 +90,15 @@ def _detect_format_xlsx(source) -> str:
         return "tp182"
 
     # ENAFOR ENF#04 — French workover format (Haoud Berkaoui, DDNH wells).
-    # Title "RAPPORT JOURNALIER DE WORKOVER" (note "DE" — distinguishes from
-    # TP-179's "DU WORK OVER").  Must be checked BEFORE TP-179 since both
-    # share "RAPPORT JOURNALIER" + "WORK".
-    if "HAOUD BERKAOUI" in blob or "RAPPORT JOURNALIER DE WORKOVER" in blob:
+    # Two layouts in circulation: 2026-05-10 title "RAPPORT JOURNALIER DE
+    # WORKOVER" (one word), 2026-05-16 title "RAPPORT JOURNALIER DE
+    # WORK-OVER" (hyphenated, lowercase).  Both have "Haoud Berkaoui" in
+    # the regional-direction line OR DDNH-NN wells.  Must be checked
+    # BEFORE TP-173 and TP-179 since they all share "RAPPORT JOURNALIER".
+    if ("HAOUD BERKAOUI" in blob
+        or "RAPPORT JOURNALIER DE WORKOVER" in blob
+        or "RAPPORT JOURNALIER DE WORK-OVER" in blob
+        or re.search(r"\bDDNH[-\s]?\d", blob)):
         return "enf04"
 
     # GW-series rigs (GWDC operator, RBL wells, REB field) — French workover
@@ -196,22 +201,22 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
 
     # Excel-backed extractors
     if fmt == "enf":
-        from extractors.enf17_extract import parse_enf17 as parse_ddr
+        from ddr_extract import parse_ddr
         data = parse_ddr(source)
     elif fmt == "tp179":
-        from extractors.tp179_extract import parse_tp179
+        from tp179_extract import parse_tp179
         data = parse_tp179(source)
     elif fmt == "tp173":
-        from extractors.tp173_extract import parse_tp173
+        from tp173_extract import parse_tp173
         data = parse_tp173(source)
     elif fmt == "tp182":
-        from extractors.tp182_extract import parse_tp182
+        from tp182_extract import parse_tp182
         data = parse_tp182(source)
     elif fmt == "tp195":
-        from extractors.tp195_extract import parse_tp195
+        from tp195_extract import parse_tp195
         data = parse_tp195(source)
     elif fmt == "gw29":
-        from extractors.gw29_extract import parse_gw29
+        from gw29_extract import parse_gw29
         data = parse_gw29(source)
     elif fmt == "enf04":
         from extractors.enf04_extract import parse_enf04

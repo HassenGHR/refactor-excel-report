@@ -1,7 +1,7 @@
 """
-enf17_extract.py — Extract structured data from an ENF17 Daily Drilling Report.
+enf17_extract.py — Extract structured data from an ENAFOR Daily Drilling Report.
 
-Replaces the template-based conversion in enf17_to_workover.py with a clean
+Replaces the template-based conversion in ddr_to_workover.py with a clean
 data-only extraction. Output is a dict that matches the format expected by
 insert_parsed_report() — the same structure that
 `excel_import_service.parse_daily_excel_report()` returns.
@@ -274,17 +274,41 @@ def _extract_header(ws, lookup) -> Dict[str, Any]:
 
 
 def _extract_activities(ws, lookup) -> List[Dict[str, Any]]:
-    """Operations / timing block. Walks rows 20..37 in cols A..E. Continuation
-    rows (empty start/end but non-empty description) are appended to the
-    previous operation's description."""
+    """Operations / timing block. Walks rows starting at 20 in cols A..E.
+    Continuation rows (empty start/end but non-empty description) are
+    appended to the previous operation's description.
+
+    The block doesn't have a fixed end row — different reports have
+    different numbers of operations.  We walk until we hit a section
+    boundary (the "AFTER MIDNIGHT" / "PLAN OPERATION" / "REMARKS" labels
+    that follow the ops table) or until we've scanned 30 rows past the
+    start (a safety cap — no real report has that many ops).
+    """
     ops: List[Dict[str, Any]] = []
     current: Optional[Dict[str, Any]] = None
-    for r in range(20, 38):
+
+    # Stop markers that signal the end of the operations block
+    STOP_MARKERS = ("AFTER MIDNIGHT", "APRÈS MINUIT", "APRES MINUIT",
+                    "PLAN OPER", "PROGRAMME", "SITUATION", "REMARKS",
+                    "REMARQUES", "PERSONNEL", "MUD CHECK")
+
+    OPS_START = 20
+    OPS_MAX_END = 50      # generous cap; we break out earlier on stop marker
+
+    for r in range(OPS_START, OPS_MAX_END):
         start_val = _cell(ws, r, 1, lookup)
         end_val   = _cell(ws, r, 2, lookup)
         hours_val = _cell(ws, r, 3, lookup)
         code_val  = _cell(ws, r, 4, lookup)
         desc_val  = _cell(ws, r, 5, lookup)
+
+        # Check for stop-marker text in col A (or anywhere on the row's first
+        # few cells).  When found, finalize the current op and exit.
+        row_marker_text = " ".join(
+            str(_cell(ws, r, c, lookup) or "") for c in range(1, 6)
+        ).upper()
+        if any(m in row_marker_text for m in STOP_MARKERS):
+            break
 
         start_t = _time_from_cell(start_val)
         end_t   = _time_from_cell(end_val)
@@ -320,15 +344,30 @@ def _extract_text_sections(ws, lookup, activities) -> Dict[str, str]:
     """Narrative text blocks."""
     sec: Dict[str, str] = {}
 
-    # After midnight: E38
-    am = _cell(ws, 38, 5, lookup)
-    if am:
-        text = _clean(str(am))
-        text = re.sub(r"^\s*AFTER\s*MIDNIGHT\s*:\s*", "", text, flags=re.IGNORECASE)
-        sec["after_midnight"] = text
+    # After midnight — scan for "AFTER MIDNIGHT" / "APRÈS MINUIT" label;
+    # the value sits on the same row in col E, or on the row below.
+    # Different reports have different numbers of operations so the label
+    # row isn't fixed.
+    pos = _scan_for(ws, lookup, "AFTER MIDNIGHT", (30, 55), (1, 8))
+    if not pos:
+        pos = _scan_for(ws, lookup, "APRÈS MINUIT", (30, 55), (1, 8))
+    if not pos:
+        pos = _scan_for(ws, lookup, "APRES MINUIT", (30, 55), (1, 8))
+    if pos:
+        # Try same row col E first, then col E one row down
+        for r_off, c in [(0, 5), (1, 5), (0, 3), (1, 3)]:
+            v = _cell(ws, pos[0] + r_off, c, lookup)
+            if v:
+                text = _clean(str(v))
+                # If we picked up the label itself, strip it
+                text = re.sub(r"^\s*(?:AFTER\s*MIDNIGHT|APR[ÈE]S\s*MINUIT)\s*:?\s*",
+                              "", text, flags=re.IGNORECASE)
+                if text and "AFTER MIDNIGHT" not in text.upper() and "MINUIT" not in text.upper():
+                    sec["after_midnight"] = text
+                    break
 
     # Plan operations: scan for "PLAN" (handles "Plan Opetations" typo too)
-    pos = _scan_for(ws, lookup, "PLAN", (50, 60), (1, 12))
+    pos = _scan_for(ws, lookup, "PLAN", (40, 70), (1, 12))
     if pos:
         # Value usually one column to the right of label
         for dc in (1, 2, 3):
@@ -339,11 +378,21 @@ def _extract_text_sections(ws, lookup, activities) -> Dict[str, str]:
 
     # "Situation au Rapport" — best inferred from operations: the last one
     # whose description contains "IN PROGRESS".
+    # Capped at 300 chars because the frontend "Situation" field has a
+    # display limit (db column is text but the UI truncates / overflows
+    # past ~300 chars).
+    SITUATION_MAX = 300
     if activities:
         in_prog = [o for o in activities if "IN PROGRESS" in (o.get("description") or "").upper()]
         chosen = in_prog[-1] if in_prog else activities[-1]
-        sec["current_operation"] = chosen["description"]
-        sec["day_summary"] = chosen["description"]
+        text = chosen["description"] or ""
+        if len(text) > SITUATION_MAX:
+            # Cut at the last whitespace before the limit so we don't break
+            # mid-word.  Append an ellipsis to flag the truncation.
+            cut = text[:SITUATION_MAX].rsplit(None, 1)[0]
+            text = cut + "…"
+        sec["current_operation"] = text
+        sec["day_summary"] = text
 
     return sec
 
@@ -501,7 +550,7 @@ def _extract_tarif_totals(activities) -> Dict[str, float]:
 # Main entry point
 # ===========================================================================
 
-def parse_enf17(source) -> Dict[str, Any]:
+def parse_ddr(source) -> Dict[str, Any]:
     """Parse an ENAFOR Daily Drilling Report and return a structured dict.
 
     `source` may be a `Path`, a string path, or a file-like object (e.g. BytesIO).
@@ -614,10 +663,6 @@ def main(argv=None) -> int:
           f"{len(data['mud_checks'])} mud props | "
           f"safety: {data['safety']}")
     return 0
-
-
-# Alias for compatibility
-parse_ddr = parse_enf17
 
 
 if __name__ == "__main__":
