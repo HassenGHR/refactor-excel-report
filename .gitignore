@@ -4,4 +4,29 @@
 *.rar
 __pycache__/
 outputs/
-reports/
+reports/a
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Pipeline outputs (intermediate router_ready files)
+*_router.xlsx
+router_ready.xlsx
+out_*.xlsx
+
+# Source uploads (the rig PDFs/XLSX users upload)
+uploads/
+samples/
+*.bak
+.DS_Store

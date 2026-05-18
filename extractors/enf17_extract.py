@@ -1,5 +1,5 @@
 """
-enf17_extract.py — Extract structured data from an ENAFOR Daily Drilling Report.
+ddr_extract.py — Extract structured data from an ENAFOR Daily Drilling Report.
 
 Replaces the template-based conversion in ddr_to_workover.py with a clean
 data-only extraction. Output is a dict that matches the format expected by
@@ -7,11 +7,11 @@ insert_parsed_report() — the same structure that
 `excel_import_service.parse_daily_excel_report()` returns.
 
 CLI:
-    python enf17_extract.py SOURCE.xlsx [-o OUTPUT.json] [--pretty]
+    python ddr_extract.py SOURCE.xlsx [-o OUTPUT.json] [--pretty]
 
 The script can also be imported and called programmatically:
 
-    from enf17_extract import parse_ddr
+    from ddr_extract import parse_ddr
     data = parse_ddr(Path("report.xlsx"))
     # data["header"]["well_name"]  -> 'TAOP#06'
     # data["activities"][0]["start_time"] -> datetime.time(0, 0)

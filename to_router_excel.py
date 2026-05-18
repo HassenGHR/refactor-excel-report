@@ -7,7 +7,7 @@ change to the FastAPI route.
 Pipeline:
     source.xlsx  ──► parse_ddr() (reads everything we can find)
                  ──► build_router_excel() (writes a layout the TP parser scans)
-                 ──► output.zip (containing Excel)  ──► unzip ──► Excel ──► POST /v1/excel_import/upload  ──► full dict
+                 ──► output.xlsx  ──► POST /v1/excel_import/upload  ──► full dict
 
 The output Excel does NOT preserve any visual template. Its job is purely to
 expose every extracted field at the cell positions and label keywords that
@@ -16,19 +16,19 @@ the original `_parse_tp`, `_extract_operations`, `_extract_mud_properties`,
 functions will find.
 
 CLI:
-    python to_router_excel.py SOURCE.xlsx [-o OUTPUT.zip]
+    python to_router_excel.py SOURCE.xlsx [-o OUTPUT.xlsx]
 """
 from __future__ import annotations
 import argparse
-import io
 import re
 import sys
-import zipfile
 from datetime import date as date_type, datetime
 from pathlib import Path
 from openpyxl import Workbook
 
-# Re-use the source extractor from ddr_extract.py (must be in same folder)
+# Format detection + dispatch lives in helpers.parse_source. It auto-detects
+# Excel vs PDF sources and routes to the right per-rig extractor module
+# under extractors/.
 from helpers.parse_source import parse_source as parse_ddr
 
 
@@ -385,12 +385,62 @@ def build_router_excel(data: dict, output_path: Path) -> None:
             ws.cell(safe_row + 1, col + 1).value = hrs
             col += 2
 
-    # Save Excel to memory, then zip it
-    bio = io.BytesIO()
-    wb.save(bio)
-    bio.seek(0)
-    with zipfile.ZipFile(output_path, 'w') as zf:
-        zf.writestr(output_path.with_suffix('.xlsx').name, bio.getvalue())
+    wb.save(output_path)
+
+
+# ---------------------------------------------------------------------------
+# Date fallbacks
+# ---------------------------------------------------------------------------
+import re as _re
+
+_FILENAME_DATE_PATTERNS = [
+    # Check ISO first (yyyy-mm-dd) so a string like "2026-05-16" doesn't get
+    # misread by the DD-MM-YYYY pattern.
+    # Use non-digit lookbehind/lookahead — \b doesn't fire between '_' and a
+    # digit because '_' is a word character.
+    _re.compile(r"(?<!\d)(\d{4})[-_./](\d{1,2})[-_./](\d{1,2})(?!\d)"),
+    # DD-MM-YYYY (or _ / .)
+    _re.compile(r"(?<!\d)(\d{1,2})[-_./](\d{1,2})[-_./](\d{4})(?!\d)"),
+]
+
+
+def _date_from_filename(path: Path):
+    """Try to pull a YYYY-MM-DD-shaped date out of a filename. Returns
+    date_type or None."""
+    from datetime import date as _date
+    name = path.name
+    for rx in _FILENAME_DATE_PATTERNS:
+        m = rx.search(name)
+        if not m:
+            continue
+        g = m.groups()
+        # Heuristic: 4-digit number is the year
+        if len(g[0]) == 4:
+            y, mo, d = int(g[0]), int(g[1]), int(g[2])
+        else:
+            d, mo, y = int(g[0]), int(g[1]), int(g[2])
+        try:
+            return _date(y, mo, d)
+        except ValueError:
+            continue
+    return None
+
+
+def _ensure_date(data: dict, source_path: Path):
+    """Make sure data['header']['date'] is set.  Order of preference:
+        1. What the extractor already found
+        2. A date in the source filename
+        3. Today (last resort so the upload doesn't fail)
+    """
+    from datetime import date as _date
+    h = data.setdefault("header", {})
+    if h.get("date"):
+        return
+    fn_date = _date_from_filename(source_path)
+    if fn_date:
+        h["date"] = fn_date
+        return
+    h["date"] = _date.today()
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +453,10 @@ def main(argv=None) -> int:
     )
     p.add_argument("source", type=Path, help="Path to the source .xlsx file")
     p.add_argument("-o", "--output", type=Path, default=None,
-                   help="Output .zip path (default: <rig>_<date>_router.zip)")
+                   help="Output .xlsx path (default: <rig>_<date>_router.xlsx)")
+    p.add_argument("--date", type=str, default=None,
+                   help="Override the report date (YYYY-MM-DD or DD-MM-YYYY). "
+                        "Used when the source has #VALUE! / broken date formulas.")
     args = p.parse_args(argv)
 
     if not args.source.exists():
@@ -412,19 +465,34 @@ def main(argv=None) -> int:
     # 1. Extract everything we can from the source
     data = parse_ddr(args.source)
 
+    # 1b. Resolve the report date.  Order:
+    #     --date CLI override > extractor's date > filename date > today
+    if args.date:
+        from datetime import datetime as _dt
+        parsed = None
+        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+            try: parsed = _dt.strptime(args.date, fmt).date(); break
+            except ValueError: continue
+        if parsed:
+            data.setdefault("header", {})["date"] = parsed
+        else:
+            sys.exit(f"ERROR: unparseable --date value: {args.date}")
+    _ensure_date(data, args.source)
+
     # 2. Build the output path
     if args.output is None:
         rig = (data["header"].get("rig_name") or "rig").replace("/", "_")
         rd = data["header"].get("date")
         date_str = (rd.strftime("%Y-%m-%d")
                     if isinstance(rd, (datetime, date_type)) else "out")
-        args.output = Path.cwd() / f"{rig}_{date_str}_router.zip"
+        args.output = Path.cwd() / f"{rig}_{date_str}_router.xlsx"
 
     # 3. Lay everything out for the TP parser
     build_router_excel(data, args.output)
 
     # 4. Summary
     print(f"Wrote {args.output}")
+    print(f"  Date used           : {data['header'].get('date')}")
     print(f"  Activities          : {len(data['activities'])}")
     print(f"  Personnel rows      : {len(data['personnel_data'])}")
     print(f"  Mud properties      : {len(data['mud_checks'])}")

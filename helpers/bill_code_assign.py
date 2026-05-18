@@ -37,7 +37,35 @@ exists (rounding noise, source data inconsistency, ops total != buckets
 total) so no op is left untagged.
 """
 from __future__ import annotations
+import re
 from typing import List, Dict, Any
+
+
+# Match a T-code anywhere in a string and extract just "T<digit>".  This
+# handles multiplier-prefixed values that some templates use:
+#   "1,05xT1"  →  "T1"
+#   "1.05 X T2" → "T2"
+#   "0,95XT3"  →  "T3"
+#   "T1"       →  "T1"  (unchanged)
+# The multiplier itself is irrelevant to the downstream insert function —
+# the rig's ValueRig/ValueRigV2 tariff already encodes the applicable
+# hourly rate.
+_BILL_CODE_RX = re.compile(r"T\s*(\d+)", re.IGNORECASE)
+
+
+def normalize_bill_code(raw) -> str:
+    """Strip multipliers / whitespace from a bill code, returning a clean
+    'T<n>' string ready for the insert function's strict regex.  Returns
+    "" if no T-code is found."""
+    if raw is None:
+        return ""
+    s = str(raw).strip()
+    if not s:
+        return ""
+    m = _BILL_CODE_RX.search(s)
+    if m:
+        return f"T{m.group(1)}"
+    return ""
 
 
 def assign_bill_codes(activities: List[Dict[str, Any]],
@@ -55,6 +83,13 @@ def assign_bill_codes(activities: List[Dict[str, Any]],
     """
     if not activities:
         return activities
+
+    # Normalize any existing bill codes — strips multiplier prefixes like
+    # "1,05xT1" that some templates use, leaving just "T<n>".  This runs
+    # unconditionally so the insert function's strict ^T(\d+)$ regex
+    # always matches, even when the source had a multiplier.
+    for a in activities:
+        a["bill"] = normalize_bill_code(a.get("bill"))
 
     # Skip ops that already have a bill code — only fill in the gaps.
     # This makes the helper safe to call unconditionally.

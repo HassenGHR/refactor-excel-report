@@ -9,7 +9,7 @@ sniffed from the first few bytes (PDF starts with %PDF-, xlsx with PK\\x03)
 so callers don't need to declare the format up front.
 
 Usage (programmatic):
-    from parse_source import parse_source
+    from helpers.parse_source import parse_source
     data = parse_source(Path("report.xlsx"))   # Excel
     data = parse_source(Path("report.pdf"))    # PDF
     data = parse_source(BytesIO(file_bytes))   # any in-memory source
@@ -209,7 +209,7 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
 
     # Excel-backed extractors
     if fmt == "enf":
-        from ddr_extract import parse_ddr
+        from extractors.enf17_extract import parse_ddr
         data = parse_ddr(source)
     elif fmt == "tp179":
         from extractors.tp179_extract import parse_tp179
@@ -248,6 +248,20 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
 
     data.setdefault("_meta", {})["source_format"] = fmt
     data["_meta"]["source_kind"] = _sniff_kind(source)
+
+    # Universal bill-code normalization.  Different rig templates use
+    # different bill formats — some have clean codes ("T1"), others use
+    # multiplier prefixes ("1,05xT1", "0.95XT2").  The downstream insert
+    # function's strict regex ^T(\d+)$ only matches the clean form, so
+    # we normalize every activity's bill code here after the extractor
+    # runs.  Empty / unrecognized values are left as "" rather than
+    # silently mis-tagged.
+    from helpers.bill_code_assign import normalize_bill_code
+    for a in data.get("activities", []) or []:
+        raw = a.get("bill", "")
+        if raw:
+            a["bill"] = normalize_bill_code(raw)
+
     return data
 
 

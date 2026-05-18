@@ -375,19 +375,32 @@ def parse_enf04(source: Union[Path, str, BytesIO]) -> dict:
         )
 
     # =====================================================================
-    # TARIFF TOTALS  (rows 64-67: T1/T2/T3/NR hours)
+    # TARIFF TOTALS  — Locate the "tarif"/"T1/T2/T3/NR" block dynamically.
+    # The table sits below the activities block.  Different reports have
+    # it at different rows (older 2026-05-10 had it at r64-67, newer
+    # 2026-05-17 has it at r65-68).  We scan for cells whose value is
+    # exactly "T1"/"T2"/"T3"/"T4"/"NR" anywhere in the lower half of the
+    # sheet and pull the hours from the immediately adjacent column.
     # =====================================================================
     tarif_totals = {}
-    for row, bill_col_letter, bill_key in [
-        (64, "G", "T1"), (65, "G", "T2"), (66, "G", "T3"), (67, "G", "NR"),
-    ]:
-        code = _clean(_cell(ws, row, 7, L) or "")            # col G
-        hrs  = _cell(ws, row, 8, L)                           # col H
-        if code == bill_key and hrs is not None:
-            try:
-                tarif_totals[bill_key.lower()] = _duration_hours(hrs)
-            except Exception:
-                pass
+    for r in range(40, min(ws.max_row + 1, 90)):
+        for c in range(1, min(ws.max_column + 1, 15)):
+            code = _clean(_cell(ws, r, c, L) or "").upper()
+            if code in ("T1", "T2", "T3", "T4", "NR"):
+                # Hours sit in the next column (or the one after, if there's
+                # a label gap).  Take the first numeric we find.
+                for dc in (1, 2, 3):
+                    v = _cell(ws, r, c + dc, L)
+                    if v is None: continue
+                    try:
+                        hrs = _duration_hours(v) if not isinstance(v, str) or not v.replace(".","").replace(",","").isalpha() else None
+                        if hrs is None: continue
+                        hrs_f = _float(v)
+                        if hrs_f > 0:
+                            tarif_totals[code.lower()] = hrs_f
+                            break
+                    except Exception:
+                        continue
 
     # =====================================================================
     # PERSONNEL  (row 70 — single row with counts only, no individual names)
