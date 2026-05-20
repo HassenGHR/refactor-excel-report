@@ -44,12 +44,21 @@ def _read_head(source) -> bytes:
 
 
 def _sniff_kind(source) -> str:
-    """Return 'pdf', 'xlsx', or 'unknown' based on the file's magic bytes."""
+    """Return 'pdf', 'xlsx', 'docx', 'doc', or 'unknown' based on the
+    file's magic bytes (and, for .docx, the file extension since it shares
+    the zip magic with .xlsx)."""
     head = _read_head(source)
     if head.startswith(b"%PDF-"):
         return "pdf"
-    # xlsx is a zip archive — starts with PK\x03\x04
+    # Legacy Word/Excel format (OLE2 Compound File Binary)
+    if head.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"):
+        return "doc"
+    # .xlsx and .docx are both zip archives — disambiguate by extension
     if head.startswith(b"PK\x03\x04"):
+        if isinstance(source, (str, Path)):
+            suffix = Path(source).suffix.lower()
+            if suffix == ".docx":
+                return "docx"
         return "xlsx"
     return "unknown"
 
@@ -182,6 +191,69 @@ def _detect_format_pdf(source) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Word format detection
+# ---------------------------------------------------------------------------
+def _detect_format_word(source) -> str:
+    """Peek at a Word source (.doc or .docx) and return the rig template
+    key.  Legacy .doc files are converted to .docx via LibreOffice (the
+    extractor handles this); for detection we just need to read the text.
+
+    Imports python-docx and (for .doc) the extractor's _ensure_docx helper
+    lazily so the dispatcher doesn't depend on Word support being
+    installed when callers only use Excel/PDF sources.
+    """
+    from docx import Document
+
+    # If it's a legacy .doc, convert first (the extractor would do this
+    # anyway).  We import the helper from the extractor module to avoid
+    # duplicating the LibreOffice subprocess logic.
+    if isinstance(source, (str, Path)):
+        suffix = Path(source).suffix.lower()
+        if suffix == ".doc":
+            from extractors.tp186_extract import _ensure_docx
+            docx_path = _ensure_docx(Path(source))
+            doc = Document(str(docx_path))
+        else:
+            doc = Document(str(source))
+    else:
+        # BytesIO — try opening as docx first; if it fails it's probably .doc
+        pos = source.tell()
+        try:
+            doc = Document(source)
+        except Exception:
+            source.seek(pos)
+            # Buffer to a temp .doc file and convert
+            import tempfile
+            from extractors.tp186_extract import _ensure_docx
+            with tempfile.NamedTemporaryFile(suffix=".doc", delete=False) as tf:
+                tf.write(source.read())
+                tmp_path = Path(tf.name)
+            source.seek(pos)
+            docx_path = _ensure_docx(tmp_path)
+            doc = Document(str(docx_path))
+
+    # Concatenate paragraph text and table text
+    parts = [p.text for p in doc.paragraphs]
+    for tbl in doc.tables[:2]:                # first 2 tables = enough
+        for row in tbl.rows:
+            for cell in row.cells:
+                parts.append(cell.text)
+    blob = " || ".join(parts).upper()
+
+    # TP-186 — ENTP rig 186, ZR wells, ZARZAITINE field, telex-style
+    # Word .doc/.docx.  Distinguishing markers:
+    #   - "RAPPORT JOURNALIER WORK-OVER" (hyphenated)
+    #   - "TP # 186" or "TP-186" or "TP 186"
+    #   - ZR# well prefix
+    if ("TP # 186" in blob or "TP-186" in blob or "TP 186" in blob
+            or re.search(r"\bZR\s*#\s*\d", blob)
+            or ("RAPPORT JOURNALIER WORK-OVER" in blob and "ZARZAITINE" in blob)):
+        return "tp186"
+
+    return "unknown"
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 def _detect_format(source) -> str:
@@ -193,6 +265,8 @@ def _detect_format(source) -> str:
         return _detect_format_pdf(source)
     if kind == "xlsx":
         return _detect_format_xlsx(source)
+    if kind in ("doc", "docx"):
+        return _detect_format_word(source)
     return "unknown"
 
 
@@ -237,6 +311,11 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
     elif fmt == "enf34_pdf":
         from extractors.enf34_pdf_extract import parse_enf34_pdf
         data = parse_enf34_pdf(source)
+
+    # Word-backed extractors (.doc auto-converted via LibreOffice → .docx)
+    elif fmt == "tp186":
+        from extractors.tp186_extract import parse_tp186
+        data = parse_tp186(source)
 
     else:
         raise ValueError(

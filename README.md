@@ -18,6 +18,7 @@ FastAPI `/v1/excel_import/upload` endpoint can ingest.
 │   ├── tp179_extract.py        # ENTP rig 179, ADRAR / HTJW wells
 │   ├── tp182_extract.py        # ENTP rig 182, SONATRACH / WIH wells
 │   ├── tp183_extract.py        # ENTP rig 183, TMLS wells
+│   ├── tp186_extract.py        # ENTP rig 186, ZARZAITINE telex (Word .doc/.docx)
 │   └── tp195_extract.py        # ENTP rig 195, AIN T'SILA / AT wells
 ├── helpers/
 │   ├── __init__.py
@@ -66,17 +67,31 @@ for op in data["activities"]:
 
 ## Supported formats
 
-| Module               | Rig    | Template                        |
-|----------------------|--------|----------------------------------|
-| enf17_extract        | ENF#17 | DDR English (OpenWells)          |
-| enf04_extract        | ENF#04 | Haoud Berkaoui — Layouts A and B |
-| tp173_extract        | TP-173 | ADRAR, ODZ wells                 |
-| tp179_extract        | TP-179 | ADRAR, HTJW wells                |
-| tp182_extract        | TP-182 | SONATRACH PRODUCTION / WIH       |
-| tp183_extract        | TP-183 | TMLS, single-sheet               |
-| tp195_extract        | TP-195 | AIN T'SILA, OFFICE REP           |
-| gw29_extract         | GW29   | GWDC REB                         |
-| enf34_pdf_extract    | ENF#34 | Gassi-Touil PDF                  |
+| Module               | Rig    | Source type | Template                        |
+|----------------------|--------|-------------|----------------------------------|
+| enf17_extract        | ENF#17 | .xlsx       | DDR English (OpenWells)          |
+| enf04_extract        | ENF#04 | .xlsx       | Haoud Berkaoui — Layouts A and B |
+| tp173_extract        | TP-173 | .xlsx       | ADRAR, ODZ wells                 |
+| tp179_extract        | TP-179 | .xlsx       | ADRAR, HTJW wells                |
+| tp182_extract        | TP-182 | .xlsx       | SONATRACH PRODUCTION / WIH       |
+| tp183_extract        | TP-183 | .xlsx       | TMLS, single-sheet               |
+| tp186_extract        | TP-186 | .doc, .docx | ZR wells, ZARZAITINE telex       |
+| tp195_extract        | TP-195 | .xlsx       | AIN T'SILA, OFFICE REP           |
+| gw29_extract         | GW29   | .xlsx       | GWDC REB                         |
+| enf34_pdf_extract    | ENF#34 | .pdf        | Gassi-Touil PDF                  |
+
+### Word .doc support
+
+Legacy Word `.doc` files (Word 97-2003 binary format) are auto-converted
+to `.docx` using **LibreOffice headless** before parsing.  This requires
+LibreOffice on the deployment host:
+
+```bash
+sudo apt-get install libreoffice          # Debian/Ubuntu
+brew install --cask libreoffice           # macOS
+```
+
+`.docx` files are read directly via python-docx — no conversion needed.
 
 ## Conventions
 
