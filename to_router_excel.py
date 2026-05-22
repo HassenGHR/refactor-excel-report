@@ -25,6 +25,8 @@ import sys
 from datetime import date as date_type, datetime
 from pathlib import Path
 from openpyxl import Workbook
+import zipfile
+from io import BytesIO
 
 # Format detection + dispatch lives in helpers.parse_source. It auto-detects
 # Excel vs PDF sources and routes to the right per-rig extractor module
@@ -55,8 +57,8 @@ def _safe_personnel_label(name: str) -> str:
     return name
 
 
-def build_router_excel(data: dict, output_path: Path) -> None:
-    """Lay out every extractable field where the TP parser will find it."""
+def _create_router_workbook(data: dict) -> Workbook:
+    """Create and fully populate the router Excel workbook (in-memory)."""
     wb = Workbook()
     ws = wb.active
 
@@ -385,7 +387,44 @@ def build_router_excel(data: dict, output_path: Path) -> None:
             ws.cell(safe_row + 1, col + 1).value = hrs
             col += 2
 
+    return wb
+
+
+def build_router_excel(data: dict, output_path: Path) -> None:
+    """Lay out every extractable field where the TP parser will find it.
+    Saves a plain .xlsx (retained for compatibility and ad-hoc debugging)."""
+    wb = _create_router_workbook(data)
     wb.save(output_path)
+
+
+def build_router_excel_zipped(data: dict, zip_path: Path, inner_name: str | None = None) -> None:
+    """Build the router Excel and package the resulting .xlsx inside a ZIP archive."""
+    wb = _create_router_workbook(data)
+
+    bio = BytesIO()
+    wb.save(bio)
+    xlsx_bytes = bio.getvalue()
+
+    if inner_name is None:
+        zname = zip_path.name
+        if zname.lower().endswith(".xlsx.zip"):
+            inner_name = zname[:-9] + ".xlsx"
+        elif zname.lower().endswith(".zip"):
+            base = zname[:-4]
+            inner_name = base if base.lower().endswith(".xlsx") else base + ".xlsx"
+        else:
+            inner_name = zname + ".xlsx"
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(inner_name, xlsx_bytes)
+
+
+def make_router_excel_bytes(data: dict) -> bytes:
+    """Return the raw .xlsx bytes for the router layout (convenience for batch mode)."""
+    wb = _create_router_workbook(data)
+    bio = BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +492,7 @@ def main(argv=None) -> int:
     )
     p.add_argument("source", type=Path, help="Path to the source .xlsx file")
     p.add_argument("-o", "--output", type=Path, default=None,
-                   help="Output .xlsx path (default: <rig>_<date>_router.xlsx)")
+                    help="Output .xlsx.zip path (default: <rig>_<date>_router.xlsx.zip)")
     p.add_argument("--date", type=str, default=None,
                    help="Override the report date (YYYY-MM-DD or DD-MM-YYYY). "
                         "Used when the source has #VALUE! / broken date formulas.")
@@ -479,19 +518,39 @@ def main(argv=None) -> int:
             sys.exit(f"ERROR: unparseable --date value: {args.date}")
     _ensure_date(data, args.source)
 
-    # 2. Build the output path
-    if args.output is None:
-        rig = (data["header"].get("rig_name") or "rig").replace("/", "_")
-        rd = data["header"].get("date")
-        date_str = (rd.strftime("%Y-%m-%d")
-                    if isinstance(rd, (datetime, date_type)) else "out")
-        args.output = Path.cwd() / f"{rig}_{date_str}_router.xlsx"
+    # 2. Build the output path — always a .zip containing the router .xlsx
+    rig = (data["header"].get("rig_name") or "rig").replace("/", "_")
+    rd = data["header"].get("date")
+    date_str = (rd.strftime("%Y-%m-%d")
+                if isinstance(rd, (datetime, date_type)) else "out")
+    base = f"{rig}_{date_str}_router"
 
-    # 3. Lay everything out for the TP parser
-    build_router_excel(data, args.output)
+    if args.output is None:
+        zip_path = Path.cwd() / f"{base}.xlsx.zip"
+        inner_name = f"{base}.xlsx"
+    else:
+        zp = args.output
+        zname = zp.name.lower()
+        if zname.endswith(".xlsx.zip"):
+            zip_path = zp
+            inner_name = zp.name[:-9] + ".xlsx"
+        elif zname.endswith(".zip"):
+            zip_path = zp
+            base_inner = zp.name[:-4]
+            inner_name = base_inner if base_inner.lower().endswith(".xlsx") else base_inner + ".xlsx"
+        else:
+            # e.g. user passed "myreport" or "myreport.xlsx"
+            if zp.suffix.lower() == ".xlsx":
+                zip_path = zp.with_suffix(".xlsx.zip")
+            else:
+                zip_path = zp.with_name(zp.name + ".xlsx.zip") if zp.suffix else Path(str(zp) + ".xlsx.zip")
+            inner_name = base + ".xlsx"
+
+    # 3. Lay everything out and zip it
+    build_router_excel_zipped(data, zip_path, inner_name)
 
     # 4. Summary
-    print(f"Wrote {args.output}")
+    print(f"Wrote {zip_path}")
     print(f"  Date used           : {data['header'].get('date')}")
     print(f"  Activities          : {len(data['activities'])}")
     print(f"  Personnel rows      : {len(data['personnel_data'])}")

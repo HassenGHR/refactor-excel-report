@@ -11,6 +11,7 @@ FastAPI `/v1/excel_import/upload` endpoint can ingest.
 ├── extractors/                 # Per-rig extraction modules
 │   ├── __init__.py
 │   ├── enf17_extract.py        # ENAFOR rig 17, English DDR
+│   ├── enf33_extract.py        # ENAFOR rig 33, BERKINE/BKNS DDR (.xlsm)
 │   ├── enf04_extract.py        # ENAFOR rig 04, Haoud Berkaoui (2 layouts)
 │   ├── enf34_pdf_extract.py    # ENAFOR rig 34, Gassi-Touil PDF
 │   ├── gw29_extract.py         # GWDC rig 29, REB
@@ -19,7 +20,9 @@ FastAPI `/v1/excel_import/upload` endpoint can ingest.
 │   ├── tp182_extract.py        # ENTP rig 182, SONATRACH / WIH wells
 │   ├── tp183_extract.py        # ENTP rig 183, TMLS wells
 │   ├── tp186_extract.py        # ENTP rig 186, ZARZAITINE telex (Word .doc/.docx)
-│   └── tp195_extract.py        # ENTP rig 195, AIN T'SILA / AT wells
+│   ├── rnse08_extract.py       # ENTP rig 188, RNSE wells (Word .doc/.docx)
+│   ├── tp195_extract.py        # ENTP rig 195, AIN T'SILA / AT wells
+│   └── entp204_extract.py      # ENTP rig 204, AIN T'SILA / TXNO wells
 ├── helpers/
 │   ├── __init__.py
 │   ├── bill_code_assign.py     # Bill-code partitioning + normalization
@@ -70,13 +73,16 @@ for op in data["activities"]:
 | Module               | Rig    | Source type | Template                        |
 |----------------------|--------|-------------|----------------------------------|
 | enf17_extract        | ENF#17 | .xlsx       | DDR English (OpenWells)          |
+| enf33_extract        | ENF#33 | .xlsx/.xlsm | DDR English, BERKINE/BKNS wells  |
 | enf04_extract        | ENF#04 | .xlsx       | Haoud Berkaoui — Layouts A and B |
 | tp173_extract        | TP-173 | .xlsx       | ADRAR, ODZ wells                 |
 | tp179_extract        | TP-179 | .xlsx       | ADRAR, HTJW wells                |
 | tp182_extract        | TP-182 | .xlsx       | SONATRACH PRODUCTION / WIH       |
 | tp183_extract        | TP-183 | .xlsx       | TMLS, single-sheet               |
 | tp186_extract        | TP-186 | .doc, .docx | ZR wells, ZARZAITINE telex       |
+| rnse08_extract       | TP-188 | .doc, .docx | RNSE wells, ops-table format     |
 | tp195_extract        | TP-195 | .xlsx       | AIN T'SILA, OFFICE REP           |
+| entp204_extract      | ENTP-204| .xlsx      | AIN T'SILA, TXNO, LABEL:value     |
 | gw29_extract         | GW29   | .xlsx       | GWDC REB                         |
 | enf34_pdf_extract    | ENF#34 | .pdf        | Gassi-Touil PDF                  |
 

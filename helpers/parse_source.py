@@ -83,6 +83,16 @@ def _detect_format_xlsx(source) -> str:
     blob = " || ".join(markers)
     wb.close()
 
+    # ENTP-204 — AIN T'SILA DWR, TXNO wells, rig ENTP 204.  Same SONATRACH
+    # template family as TP-182 / TP-195 but stores header as combined
+    # "LABEL : value" strings and has a FROM/TO/HRS/DESCRIPTION/BILL ops
+    # table.  Must be checked BEFORE TP-195 and TP-182 since it shares
+    # their "OFFICE REP"-less SONATRACH markers; distinguished by the
+    # ENTP-204 rig name or TXNO well prefix.
+    if ("ENTP 204" in blob or "ENTP204" in blob or "ENTP-204" in blob
+            or re.search(r"\bTXNO[-\s]?\d", blob)):
+        return "entp204"
+
     # TP-195 — SONATRACH AIN T'SILA format.  Same template family as TP-182
     # (English, "DAILY DRILLING REPORT" title) but uses split label/value
     # cells, "OFFICE REP" instead of "SUPERINTANDANT", and only "NEXT BOP
@@ -137,6 +147,16 @@ def _detect_format_xlsx(source) -> str:
     # TP-179 — French workover format (ENTP rigs)
     if "RAPPORT JOURNALIER" in blob and "WORK" in blob:
         return "tp179"
+
+    # ENAFOR ENF#33 — BERKINE field, BKNS wells.  Wide single-sheet English
+    # DDR with a DIFFERENT cell layout from the ENF#17 DDR, so it needs its
+    # own extractor.  Both share the "DAILY DRILLING REPORT" title and the
+    # generic "RIG.S.I" field label, so we distinguish ENF#33 by its
+    # specific rig number ("ENF # 33") or BKNS well prefix — NOT by RIG.S.I,
+    # which appears in every ENAFOR DDR.  Must be checked BEFORE the generic
+    # ENF branch below.
+    if "ENF # 33" in blob or "ENF#33" in blob or re.search(r"\bBKNS[-\s]?\d", blob):
+        return "enf33"
 
     # ENAFOR DDR (ENF#NN rigs) — distinguishing markers
     if "DAILY DRILLING REPORT" in blob and ("ENF#" in blob or "ENF #" in blob):
@@ -240,6 +260,16 @@ def _detect_format_word(source) -> str:
                 parts.append(cell.text)
     blob = " || ".join(parts).upper()
 
+    # RNSE-08 — ENTP rig 188, RNSE wells.  French workover report with a
+    # "Déroulement des opérations" operations table and per-op tarif codes.
+    # Distinguishing markers: the operations-table title or RNSE well /
+    # TP 188 rig.
+    if ("DÉROULEMENT DES OPÉRATIONS" in blob
+            or "DEROULEMENT DES OPERATIONS" in blob
+            or re.search(r"\bRNSE[-\s]?\d", blob)
+            or "TP 188" in blob or "TP-188" in blob):
+        return "rnse08"
+
     # TP-186 — ENTP rig 186, ZR wells, ZARZAITINE field, telex-style
     # Word .doc/.docx.  Distinguishing markers:
     #   - "RAPPORT JOURNALIER WORK-OVER" (hyphenated)
@@ -285,6 +315,9 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
     if fmt == "enf":
         from extractors.enf17_extract import parse_ddr
         data = parse_ddr(source)
+    elif fmt == "enf33":
+        from extractors.enf33_extract import parse_enf33
+        data = parse_enf33(source)
     elif fmt == "tp179":
         from extractors.tp179_extract import parse_tp179
         data = parse_tp179(source)
@@ -300,6 +333,9 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
     elif fmt == "tp195":
         from extractors.tp195_extract import parse_tp195
         data = parse_tp195(source)
+    elif fmt == "entp204":
+        from extractors.entp204_extract import parse_entp204
+        data = parse_entp204(source)
     elif fmt == "gw29":
         from extractors.gw29_extract import parse_gw29
         data = parse_gw29(source)
@@ -316,6 +352,9 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
     elif fmt == "tp186":
         from extractors.tp186_extract import parse_tp186
         data = parse_tp186(source)
+    elif fmt == "rnse08":
+        from extractors.rnse08_extract import parse_rnse08
+        data = parse_rnse08(source)
 
     else:
         raise ValueError(

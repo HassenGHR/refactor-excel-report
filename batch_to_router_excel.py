@@ -12,14 +12,19 @@ Usage:
 Each input file is routed through helpers.parse_source.parse_source which
 auto-detects its rig template. Files whose format isn't recognized are
 skipped with a warning rather than aborting the batch.
+
+All successfully generated router Excel files are collected into a single
+ZIP archive (router_batch_YYYY-MM-DD_HHMM.zip) in the output directory.
+The archive contains the individual .xlsx files (not further zipped).
 """
 from __future__ import annotations
 import argparse
 import sys
+import zipfile
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
-from to_router_excel import build_router_excel, _ensure_date, parse_ddr
+from to_router_excel import build_router_excel, _ensure_date, parse_ddr, make_router_excel_bytes
 from datetime import datetime, date as date_type
 
 
@@ -41,8 +46,8 @@ def _iter_sources(input_dir: Path, recursive: bool, pattern: str) -> List[Path]:
     ]
 
 
-def _process_one(source: Path, output_dir: Path) -> dict:
-    """Convert a single source file. Returns a result record."""
+def _process_one(source: Path) -> dict:
+    """Convert a single source file. Returns a result record (with bytes on success)."""
     try:
         data = parse_ddr(source)
         _ensure_date(data, source)
@@ -51,14 +56,15 @@ def _process_one(source: Path, output_dir: Path) -> dict:
         rd = data["header"].get("date")
         date_str = (rd.strftime("%Y-%m-%d")
                     if isinstance(rd, (datetime, date_type)) else "out")
-        out_path = output_dir / f"{rig}_{date_str}_router.xlsx"
+        inner_name = f"{rig}_{date_str}_router.xlsx"
+        xlsx_bytes = make_router_excel_bytes(data)
 
-        build_router_excel(data, out_path)
         return {
             "source": str(source),
             "status": "ok",
             "format": data.get("_meta", {}).get("source_format"),
-            "output": str(out_path),
+            "inner": inner_name,
+            "bytes": xlsx_bytes,
             "activities": len(data["activities"]),
             "date": str(rd) if rd else None,
         }
@@ -72,13 +78,14 @@ def _process_one(source: Path, output_dir: Path) -> dict:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         description="Batch-convert a directory of rig reports to "
-                    "router-ready Excel files."
+                    "router-ready Excel files, delivered as one ZIP archive "
+                    "containing all the .xlsx files."
     )
     p.add_argument("input_dir", type=Path,
-                   help="Directory containing source .xlsx/.pdf files")
+                    help="Directory containing source .xlsx/.pdf files")
     p.add_argument("-o", "--output-dir", type=Path, default=None,
-                   help="Where to write router-ready outputs "
-                        "(default: same as input_dir)")
+                    help="Directory where the final ZIP archive will be written "
+                         "(default: same as input_dir)")
     p.add_argument("-r", "--recursive", action="store_true",
                    help="Recurse into subdirectories")
     p.add_argument("--pattern", default="*",
@@ -96,15 +103,17 @@ def main(argv=None) -> int:
         print(f"No source files found in {args.input_dir} (pattern {args.pattern!r}).")
         return 0
 
-    print(f"Found {len(sources)} file(s); writing outputs to {output_dir}")
+    print(f"Found {len(sources)} file(s); will create ZIP archive in {output_dir}")
     print()
 
     ok = skipped = errored = 0
+    results = []
     for src in sources:
-        result = _process_one(src, output_dir)
+        result = _process_one(src)
+        results.append(result)
         if result["status"] == "ok":
             ok += 1
-            print(f"  ✓  {src.name}  →  {Path(result['output']).name}  "
+            print(f"  ✓  {src.name}  →  {result['inner']}  "
                   f"[{result['format']}, {result['activities']} ops, {result['date']}]")
         elif result["status"] == "skipped":
             skipped += 1
@@ -112,6 +121,21 @@ def main(argv=None) -> int:
         else:
             errored += 1
             print(f"  ✗  {src.name}: ERROR — {result['error']}")
+
+    # Package all successful .xlsx into one ZIP archive
+    goods: List[Tuple[str, bytes]] = [
+        (r["inner"], r["bytes"]) for r in results
+        if r["status"] == "ok" and "bytes" in r
+    ]
+    if goods:
+        ts = datetime.now().strftime("%Y-%m-%d_%H%M")
+        zip_name = f"router_batch_{ts}.zip"
+        zip_path = output_dir / zip_name
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for inner, content in goods:
+                zf.writestr(inner, content)
+        print()
+        print(f"Created ZIP archive: {zip_path}  (contains {len(goods)} Excel file(s))")
 
     print()
     print(f"Summary: {ok} succeeded, {skipped} skipped, {errored} errored "
