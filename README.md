@@ -10,7 +10,10 @@ FastAPI `/v1/excel_import/upload` endpoint can ingest.
 .
 ├── extractors/                 # Per-rig extraction modules
 │   ├── __init__.py
+│   ├── enf06_extract.py        # ENAFOR rig 06, Daily Workover Report
+│   ├── enf08_extract.py        # ENAFOR rig 08, Daily Workover Report
 │   ├── enf17_extract.py        # ENAFOR rig 17, English DDR
+│   ├── enf27_extract.py        # ENAFOR rig 27, Direction Régionale OHANET
 │   ├── enf33_extract.py        # ENAFOR rig 33, BERKINE/BKNS DDR (.xlsm)
 │   ├── enf04_extract.py        # ENAFOR rig 04, Haoud Berkaoui (2 layouts)
 │   ├── enf34_pdf_extract.py    # ENAFOR rig 34, Gassi-Touil PDF
@@ -72,9 +75,12 @@ for op in data["activities"]:
 
 | Module               | Rig    | Source type | Template                        |
 |----------------------|--------|-------------|----------------------------------|
-| enf17_extract        | ENF#17 | .xlsx       | DDR English (OpenWells)          |
-| enf33_extract        | ENF#33 | .xlsx/.xlsm | DDR English, BERKINE/BKNS wells  |
 | enf04_extract        | ENF#04 | .xlsx       | Haoud Berkaoui — Layouts A and B |
+| enf06_extract        | ENF#06 | .xlsx       | Daily Workover Report            |
+| enf08_extract        | ENF#08 | .xlsx       | Daily Workover Report            |
+| enf17_extract        | ENF#17 | .xlsx       | DDR English (OpenWells)          |
+| enf27_extract        | ENF#27 | .xlsx       | DIRECTION REGIONALE OHANET       |
+| enf33_extract        | ENF#33 | .xlsx/.xlsm | DDR English, BERKINE/BKNS wells  |
 | tp173_extract        | TP-173 | .xlsx       | ADRAR, ODZ wells                 |
 | tp179_extract        | TP-179 | .xlsx       | ADRAR, HTJW wells                |
 | tp182_extract        | TP-182 | .xlsx       | SONATRACH PRODUCTION / WIH       |
@@ -82,7 +88,7 @@ for op in data["activities"]:
 | tp186_extract        | TP-186 | .doc, .docx | ZR wells, ZARZAITINE telex       |
 | rnse08_extract       | TP-188 | .doc, .docx | RNSE wells, ops-table format     |
 | tp195_extract        | TP-195 | .xlsx       | AIN T'SILA, OFFICE REP           |
-| entp204_extract      | ENTP-204| .xlsx      | AIN T'SILA, TXNO, LABEL:value     |
+| entp204_extract      | ENTP-204 | .xlsx      | AIN T'SILA, TXNO, LABEL:value    |
 | gw29_extract         | GW29   | .xlsx       | GWDC REB                         |
 | enf34_pdf_extract    | ENF#34 | .pdf        | Gassi-Touil PDF                  |
 
