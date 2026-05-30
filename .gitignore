@@ -4,6 +4,7 @@
 *.rar
 __pycache__/
 outputs/
+reports/
 reports/a
 __pycache__/
 *.pyc
