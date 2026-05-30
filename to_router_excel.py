@@ -490,7 +490,8 @@ def main(argv=None) -> int:
         description="Convert a source Excel report to a router-friendly Excel "
                     "the existing excel_import_service.py can fully parse."
     )
-    p.add_argument("source", type=Path, help="Path to the source .xlsx file")
+    p.add_argument("source", type=Path,
+                    help="Path to the source Excel workbook (.xlsx/.xlsm/.xltx/.xltm)")
     p.add_argument("-o", "--output", type=Path, default=None,
                     help="Output .xlsx.zip path (default: <rig>_<date>_router.xlsx.zip)")
     p.add_argument("--date", type=str, default=None,

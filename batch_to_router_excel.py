@@ -28,7 +28,7 @@ from to_router_excel import build_router_excel, _ensure_date, parse_ddr, make_ro
 from datetime import datetime, date as date_type
 
 
-SUPPORTED_SUFFIXES = (".xlsx", ".xls", ".pdf")
+SUPPORTED_SUFFIXES = (".xlsx", ".xls", ".pdf", ".doc", ".docx")
 
 
 def _iter_sources(input_dir: Path, recursive: bool, pattern: str) -> List[Path]:

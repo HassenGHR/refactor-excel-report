@@ -160,6 +160,18 @@ def _parse_op_time(v) -> Optional[time]:
     return None
 
 
+def _prev_end_minutes(prev_op) -> Optional[int]:
+    """Recover the previous op's end time as minutes-since-midnight,
+    reconstructing it from start + hours so that a midnight end (stored as
+    time(0,0)) is correctly treated as 1440 rather than 0."""
+    st = prev_op.get("start_time")
+    if st is None:
+        return None
+    start_min = st.hour * 60 + st.minute
+    hours = prev_op.get("hours", 0.0) or 0.0
+    return int(round(start_min + hours * 60))
+
+
 def _tod_minutes(v) -> Optional[int]:
     """Convert an operation time cell to minutes-since-midnight as an
     ABSOLUTE time-of-day.  Crucially, an end-of-day midnight is encoded in
@@ -309,7 +321,6 @@ def parse_entp204(source: Union[Path, str, BytesIO]) -> dict:
             break
 
     if ops_header_row:
-        seen_real_op = False
         in_after_midnight = False
         for r in range(ops_header_row + 1, ops_header_row + 30):
             from_v = _cell(ws, r, 2, L)
@@ -327,8 +338,10 @@ def parse_entp204(source: Union[Path, str, BytesIO]) -> dict:
 
             # "AFTER MIDNIGHT" (often misspelled "AFTER MIDNIGTH") is a
             # section label: everything below it belongs to the next day's
-            # first hours.  Flip into after-midnight mode and don't fold the
-            # label itself into the previous op.
+            # first hours.  This is the ONLY boundary between same-day ops
+            # and after-midnight ops — we must NOT infer the boundary from a
+            # missing bill code, because same-day ops legitimately lack bill
+            # codes mid-day (they get back-assigned from the tarif totals).
             if "AFTER MIDN" in desc.upper():
                 in_after_midnight = True
                 continue
@@ -345,16 +358,27 @@ def parse_entp204(source: Union[Path, str, BytesIO]) -> dict:
                     after_midnight_parts.append(desc)
                 continue
 
-            # Convert FROM / TO to minutes-since-midnight.  In this template
-            # the cells are absolute times-of-day stored as timedeltas, where
-            # an end at midnight is encoded as "1 day, 0:00:00" (= 1440 min,
-            # i.e. 24:00) rather than 0.  So we read the raw timedelta /
-            # time directly here instead of going through _parse_op_time
-            # (which would collapse 24:00 → 00:00 and lose the distinction).
             sm = _tod_minutes(from_v)
             em = _tod_minutes(to_v)
+
+            # Some source files have a data-entry quirk where an op's FROM is
+            # left at 00:00 (or otherwise earlier than the previous op's TO),
+            # creating an overlap that inflates the daily total past 24h.
+            # Snap the start to the previous op's end so the timeline is
+            # contiguous.  Only do this when it produces a sane forward span.
+            if activities and sm is not None:
+                prev_em = _tod_minutes(activities[-1]["end_time"])
+                # prev end stored as time(0,0) for a midnight-end would read 0;
+                # recompute from the stored hours instead when needed.
+                prev_end_min = _prev_end_minutes(activities[-1])
+                if prev_end_min is not None and sm < prev_end_min <= (em if em is not None else 1440):
+                    sm = prev_end_min
+
             start_t = _parse_op_time(from_v)
             end_t   = _parse_op_time(to_v)
+            # Reflect any snap in the displayed start time
+            if sm is not None:
+                start_t = time((sm // 60) % 24, sm % 60)
 
             if sm is not None and em is not None:
                 if em > sm:
@@ -365,12 +389,6 @@ def parse_entp204(source: Union[Path, str, BytesIO]) -> dict:
                 else:
                     # end < start: wrapped past midnight (rare in this template)
                     hours = (em + 1440 - sm) / 60.0
-
-                if not bill and seen_real_op:
-                    # after-midnight continuation without an explicit label
-                    if desc:
-                        after_midnight_parts.append(desc)
-                    continue
 
                 activities.append({
                     "start_time": start_t,
@@ -384,8 +402,6 @@ def parse_entp204(source: Union[Path, str, BytesIO]) -> dict:
                     "npt_company": "", "op_company": comp,
                     "bill": bill,
                 })
-                if bill:
-                    seen_real_op = True
             elif desc and activities and desc.upper() != "DESCRIPTION":
                 # Genuine continuation line for the current op
                 activities[-1]["description"] = (
@@ -409,6 +425,17 @@ def parse_entp204(source: Union[Path, str, BytesIO]) -> dict:
                     if hrs > 0:
                         tarif_totals[code] = hrs
             break
+
+    # Back-assign bill codes for any operations that don't already carry
+    # one.  Same-day ops frequently leave the BILL column blank mid-day
+    # (only some rows are tariffed in the source); the tarif-totals row
+    # gives the daily breakdown.  assign_bill_codes keeps existing per-op
+    # codes and partitions the remaining unbilled hours into the leftover
+    # T-buckets.
+    has_unbilled = any(not _clean(a.get("bill")) for a in activities)
+    if has_unbilled and tarif_totals:
+        from helpers.bill_code_assign import assign_bill_codes
+        activities = assign_bill_codes(activities, tarif_totals)
 
     # If the ops table has per-op bills but no hours yet, and tarif_totals
     # tells us the breakdown, the universal normalize pass + insert handle

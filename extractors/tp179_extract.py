@@ -197,45 +197,63 @@ def parse_tp179(source: Union[Path, str, BytesIO]) -> dict:
             daily_totals[code] = v
 
     # Walk operation rows. The layout uses ONE row per operation with
-    # A=start time, B=end time, C=tarif, D=description. Hours come from
-    # the daily-totals table since there's no per-row H column.
+    # A=start time, B=end time, C=Tr (often unused), D=description.
+    # Two sub-variants exist:
+    #   (a) per-op tarif code in column C (older files)
+    #   (b) NO per-op code — only start/end/description, with the T-code
+    #       breakdown living in the daily-totals table (this file).
+    # We handle both: read every row that has a parseable start/end time
+    # (or a description continuation), capture any per-op code if present,
+    # and back-assign the rest from the daily totals afterwards.
     for row in range(13, 30):
         a = _cell(ws, row, 1, L)
         b = _cell(ws, row, 2, L)
         c = _cell(ws, row, 3, L)
         d = _cell(ws, row, 4, L)
-        # Skip rows that are labels or blank
-        if a is None and not d:
-            continue
-        # Some rows in this region are non-operations (e.g., "BUT DU WORK
-        # OVER" overflow, "Situation" rows starting at r30). Filter by tarif.
-        tarif = _clean(c).upper()
-        if not re.match(r"^T[1-4]$|^NR$", tarif):
-            continue
 
+        desc = _clean(d)
         start_t = _time_parse(a)
         end_t = _time_parse(b)
-        if start_t is None and end_t is None and not d:
+
+        # Stop at the post-operations section labels (Situation / Programme /
+        # Remarque / NEED / DTM COST) that live below the ops block.
+        a_text = _clean(a).upper()
+        if any(m in a_text for m in ("SITUATION", "PROGRAMME", "REMARQUE",
+                                      "NEED", "BUT DU WORK")):
+            break
+        d_upper = desc.upper()
+        if d_upper.startswith(("DTM COST",)):
+            # cost annotation line, not an operation
+            if start_t is None and end_t is None:
+                continue
+
+        # An operation row needs at least a start time.  Rows with only a
+        # description and no time fold into the previous op (continuation).
+        if start_t is None and end_t is None:
+            if desc and activities:
+                activities[-1]["description"] = (
+                    activities[-1]["description"] + "\n" + desc
+                ).strip()
             continue
 
-        # Compute duration. 00:00 → 00:00 means a 24h operation.
+        # Per-op tarif code, if this file carries one in column C
+        tarif = _clean(c).upper()
+        if not re.match(r"^T[1-4]$|^NR$", tarif):
+            tarif = ""           # will be back-assigned from daily totals
+
+        # Compute duration. 00:00 → 00:00 means a 24h operation; an end of
+        # 00:00 (midnight) after a non-zero start wraps to end-of-day.
         if start_t and end_t:
             sm = start_t.hour * 60 + start_t.minute
             em = end_t.hour * 60 + end_t.minute
             if em == sm:
-                hours = 24.0
+                hours = 24.0 if sm == 0 else 0.0
             elif em > sm:
                 hours = (em - sm) / 60.0
             else:
                 hours = (em + 24 * 60 - sm) / 60.0
         else:
-            # Fall back to the tarif's daily total when only one operation has
-            # that tarif code today (common in workover rig-move days).
-            same_code = [op for op in activities if op.get("bill") == tarif]
-            if not same_code and tarif in daily_totals:
-                hours = daily_totals[tarif]
-            else:
-                hours = 0.0
+            hours = 0.0
 
         activities.append({
             "start_time": start_t,
@@ -244,12 +262,21 @@ def parse_tp179(source: Union[Path, str, BytesIO]) -> dict:
             "phase_name": "",
             "code": "",
             "sub": "",
-            "description": _clean(d),
+            "description": desc,
             "start_md": 0, "end_md": 0,
             "npt": 0, "npt_detail": "",
             "npt_company": "", "op_company": "",
             "bill": tarif,
         })
+
+    # Back-assign bill codes from the daily totals for ops that didn't
+    # carry a per-op code (variant b).  The shared helper partitions the
+    # ops into groups whose hours sum to each T-bucket total; for the
+    # common single-code day it just tags every op with that code.
+    # assign_bill_codes expects lowercase keys (t1/t2/...).
+    from helpers.bill_code_assign import assign_bill_codes
+    _lc_totals = {k.lower(): v for k, v in daily_totals.items()}
+    activities = assign_bill_codes(activities, _lc_totals)
 
     # =====================================================================
     # TEXT SECTIONS (Situation, Programme prévu, Remarque)

@@ -1,413 +1,571 @@
 #!/usr/bin/env python3
 """
-parse_source.py — auto-detect rig-report format and dispatch to the
-appropriate extractor.
-
-Accepts both Excel sources (.xlsx — most rigs) and PDF sources (some rigs
-deliver their daily reports as PDF instead of Excel). The file type is
-sniffed from the first few bytes (PDF starts with %PDF-, xlsx with PK\\x03)
-so callers don't need to declare the format up front.
-
-Usage (programmatic):
-    from helpers.parse_source import parse_source
-    data = parse_source(Path("report.xlsx"))   # Excel
-    data = parse_source(Path("report.pdf"))    # PDF
-    data = parse_source(BytesIO(file_bytes))   # any in-memory source
-
-Usage (CLI):
-    python parse_source.py report.xlsx           # prints detected format
-    python parse_source.py report.pdf --json     # prints the extracted dict
+helpers/parse_source.py — detect Daily Workover Report format and dispatch to appropriate extractor.
 """
 from __future__ import annotations
+
 import re
-import sys
+import tempfile
+import zipfile
+from datetime import datetime
 from pathlib import Path
 from typing import Union
-from io import BytesIO
 
+from docx import Document
 from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
+from openpyxl.worksheet.worksheet import Worksheet
 
-
-# ---------------------------------------------------------------------------
-# File-type sniffing — by magic bytes, not by extension
-# ---------------------------------------------------------------------------
-def _read_head(source) -> bytes:
-    """Read the first 8 bytes of a source without consuming it."""
-    if isinstance(source, (str, Path)):
-        with open(source, "rb") as f:
-            return f.read(8)
-    # BytesIO or similar: remember position, peek, restore
-    pos = source.tell()
-    head = source.read(8)
-    source.seek(pos)
-    return head
-
-
-def _sniff_kind(source) -> str:
-    """Return 'pdf', 'xlsx', 'docx', 'doc', or 'unknown' based on the
-    file's magic bytes (and, for .docx, the file extension since it shares
-    the zip magic with .xlsx)."""
-    head = _read_head(source)
-    if head.startswith(b"%PDF-"):
-        return "pdf"
-    # Legacy Word/Excel format (OLE2 Compound File Binary)
-    if head.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"):
-        return "doc"
-    # .xlsx and .docx are both zip archives — disambiguate by extension
-    if head.startswith(b"PK\x03\x04"):
-        if isinstance(source, (str, Path)):
-            suffix = Path(source).suffix.lower()
-            if suffix == ".docx":
-                return "docx"
-        return "xlsx"
-    return "unknown"
-
-
-# ---------------------------------------------------------------------------
-# Excel format detection
-# ---------------------------------------------------------------------------
-def _detect_format_xlsx(source) -> str:
-    """Peek at an Excel source and return the rig template key."""
-    if isinstance(source, (str, Path)):
-        wb = load_workbook(source, data_only=True, read_only=True)
-    else:
-        wb = load_workbook(source, data_only=True, read_only=True)
-    ws = wb.active
-
-    # Scan the first 12 rows × 28 cols for marker strings
-    markers = []
-    for row in ws.iter_rows(min_row=1, max_row=12, max_col=28, values_only=True):
-        for v in row:
-            if v is not None:
-                markers.append(str(v).upper())
-    blob = " || ".join(markers)
-    wb.close()
-
-    # ENTP-204 — AIN T'SILA DWR, TXNO wells, rig ENTP 204.  Same SONATRACH
-    # template family as TP-182 / TP-195 but stores header as combined
-    # "LABEL : value" strings and has a FROM/TO/HRS/DESCRIPTION/BILL ops
-    # table.  Must be checked BEFORE TP-195 and TP-182 since it shares
-    # their "OFFICE REP"-less SONATRACH markers; distinguished by the
-    # ENTP-204 rig name or TXNO well prefix.
-    if ("ENTP 204" in blob or "ENTP204" in blob or "ENTP-204" in blob
-            or re.search(r"\bTXNO[-\s]?\d", blob)):
-        return "entp204"
-
-    # TP-195 — SONATRACH AIN T'SILA format.  Same template family as TP-182
-    # (English, "DAILY DRILLING REPORT" title) but uses split label/value
-    # cells, "OFFICE REP" instead of "SUPERINTANDANT", and only "NEXT BOP
-    # TEST" (no LAST BOP).  Must be checked BEFORE TP-182 since both share
-    # the SONATRACH PRODUCTION DIVISION title.
-    if "OFFICE REP" in blob:
-        return "tp195"
-
-    # TP-182 — SONATRACH PRODUCTION DIVISION Daily Drilling Report format
-    # (English, "SUPERINTANDANT" misspelling, has "WORKOVER REASON")
-    if "SUPERINTANDANT" in blob:        # specific to TP-182 template
-        return "tp182"
-    if "SONATRACH PRODUCTION DIVISION" in blob and "DAILY DRILLING REPORT" in blob:
-        return "tp182"
-
-    # ENAFOR ENF#04 — French workover format (Haoud Berkaoui, DDNH wells).
-    # Two layouts in circulation: 2026-05-10 title "RAPPORT JOURNALIER DE
-    # WORKOVER" (one word), 2026-05-16 title "RAPPORT JOURNALIER DE
-    # WORK-OVER" (hyphenated, lowercase).  Both have "Haoud Berkaoui" in
-    # the regional-direction line OR DDNH-NN wells.  Must be checked
-    # BEFORE TP-173 and TP-179 since they all share "RAPPORT JOURNALIER".
-    if ("HAOUD BERKAOUI" in blob
-        or "RAPPORT JOURNALIER DE WORKOVER" in blob
-        or "RAPPORT JOURNALIER DE WORK-OVER" in blob
-        or re.search(r"\bDDNH[-\s]?\d", blob)):
-        return "enf04"
-
-    # TP-183 — ENTP rig 183, TMLS wells.  Different title from TP-173/TP-179
-    # ("RAPPORT JOURNALIER WORK OVER" — no "DE", no "DU") and uses a
-    # compact ~62-row single-sheet template with cost analysis.  Must be
-    # checked BEFORE both TP-173 (shares "DERNIER TUBAGE" label) AND GW29
-    # (shares "PARAMETRES" marker).
-    if "TP 183" in blob or "TP-183" in blob or re.search(r"\bTMLS\b", blob):
-        return "tp183"
-
-    # GW-series rigs (GWDC operator, RBL wells, REB field) — French workover
-    # format but with distinct AVANCEMENT/OUTILS/USURE/PARAMETRES layout.
-    # Must be checked BEFORE the generic TP-179 catch-all below since GW29
-    # also has "RAPPORT JOURNALIER" + "WORK".
-    if "RAPPORT JOURNALIER" in blob and ("AVANCEMENT" in blob
-                                         or "PARAMETRES" in blob
-                                         or re.search(r"\bGW\s?\d{2}\b", blob)):
-        return "gw29"
-
-    # TP-173 — same template family as TP-179 (RAPPORT JOURNALIER DU WORK
-    # OVER, ADRAR region) but with different cell positions: "APPAREIL:"
-    # instead of "RIG :", "DERNIER TUBAGE:" combined string for casing.
-    # Must be checked BEFORE TP-179 since both share the title.
-    if "TP-173" in blob or "DERNIER TUBAGE" in blob:
-        return "tp173"
-
-    # TP-179 — French workover format (ENTP rigs)
-    if "RAPPORT JOURNALIER" in blob and "WORK" in blob:
-        return "tp179"
-
-    # ENAFOR ENF#33 — BERKINE field, BKNS wells.  Wide single-sheet English
-    # DDR with a DIFFERENT cell layout from the ENF#17 DDR, so it needs its
-    # own extractor.  Both share the "DAILY DRILLING REPORT" title and the
-    # generic "RIG.S.I" field label, so we distinguish ENF#33 by its
-    # specific rig number ("ENF # 33") or BKNS well prefix — NOT by RIG.S.I,
-    # which appears in every ENAFOR DDR.  Must be checked BEFORE the generic
-    # ENF branch below.
-    if "ENF # 33" in blob or "ENF#33" in blob or re.search(r"\bBKNS[-\s]?\d", blob):
-        return "enf33"
-
-    # ENAFOR DDR (ENF#NN rigs) — distinguishing markers
-    if "DAILY DRILLING REPORT" in blob and ("ENF#" in blob or "ENF #" in blob):
-        return "enf"
-
-    # Generic drilling — try enf as a fallback
-    if "DAILY DRILLING REPORT" in blob:
-        return "enf"
-
-    return "unknown"
-
-
-# ---------------------------------------------------------------------------
-# PDF format detection
-# ---------------------------------------------------------------------------
-def _detect_format_pdf(source) -> str:
-    """Peek at a PDF source and return the rig template key.
-
-    Reads the first 2 pages and scans for distinguishing marker phrases.
-    pdfplumber is imported lazily so the module still loads on systems
-    without it when only Excel sources are used.
-    """
-    import pdfplumber
-
-    if isinstance(source, BytesIO):
-        # pdfplumber consumes BytesIO; rewind it for the caller after detection
-        pos = source.tell()
+# Import extractors - handle import errors gracefully for development
+try:
+    from ..extractors.enf08_extract import parse_enf08
+except ImportError:
+    try:
+        from extractors.enf08_extract import parse_enf08
+    except ImportError:
         try:
-            with pdfplumber.open(source) as pdf:
-                pages_to_scan = pdf.pages[:2]
-                blob = " || ".join(
-                    (p.extract_text() or "").upper() for p in pages_to_scan
-                )
-        finally:
-            source.seek(pos)
-    else:
-        with pdfplumber.open(source) as pdf:
-            pages_to_scan = pdf.pages[:2]
-            blob = " || ".join(
-                (p.extract_text() or "").upper() for p in pages_to_scan
-            )
+            from .enf08_extract import parse_enf08
+        except ImportError:
+            parse_enf08 = None  # type: ignore
 
-    # ENF#34 — Gassi-Touil workover PDF (this is the first PDF format we
-    # support).  Distinguishing markers: "GASSI" + "RAPPORT JOURNALIER DE
-    # WORK OVER" (note the space in "WORK OVER" — TP-179 uses "WORKOVER").
-    if "GASSI" in blob and "RAPPORT JOURNALIER" in blob and "WORK" in blob:
-        return "enf34_pdf"
-    if "DIRECTION RÉGIONALE GASSI" in blob or "GASSI-TOUIL" in blob:
-        return "enf34_pdf"
-
-    return "unknown"
-
-
-# ---------------------------------------------------------------------------
-# Word format detection
-# ---------------------------------------------------------------------------
-def _detect_format_word(source) -> str:
-    """Peek at a Word source (.doc or .docx) and return the rig template
-    key.  Legacy .doc files are converted to .docx via LibreOffice (the
-    extractor handles this); for detection we just need to read the text.
-
-    Imports python-docx and (for .doc) the extractor's _ensure_docx helper
-    lazily so the dispatcher doesn't depend on Word support being
-    installed when callers only use Excel/PDF sources.
-    """
-    from docx import Document
-
-    # If it's a legacy .doc, convert first (the extractor would do this
-    # anyway).  We import the helper from the extractor module to avoid
-    # duplicating the LibreOffice subprocess logic.
-    if isinstance(source, (str, Path)):
-        suffix = Path(source).suffix.lower()
-        if suffix == ".doc":
-            from extractors.tp186_extract import _ensure_docx
-            docx_path = _ensure_docx(Path(source))
-            doc = Document(str(docx_path))
-        else:
-            doc = Document(str(source))
-    else:
-        # BytesIO — try opening as docx first; if it fails it's probably .doc
-        pos = source.tell()
+try:
+    from ..extractors.enf06_extract import parse_enf06
+except ImportError:
+    try:
+        from extractors.enf06_extract import parse_enf06
+    except ImportError:
         try:
-            doc = Document(source)
-        except Exception:
-            source.seek(pos)
-            # Buffer to a temp .doc file and convert
-            import tempfile
-            from extractors.tp186_extract import _ensure_docx
-            with tempfile.NamedTemporaryFile(suffix=".doc", delete=False) as tf:
-                tf.write(source.read())
-                tmp_path = Path(tf.name)
-            source.seek(pos)
-            docx_path = _ensure_docx(tmp_path)
-            doc = Document(str(docx_path))
+            from .enf06_extract import parse_enf06
+        except ImportError:
+            parse_enf06 = None  # type: ignore
 
-    # Concatenate paragraph text and table text
-    parts = [p.text for p in doc.paragraphs]
-    for tbl in doc.tables[:2]:                # first 2 tables = enough
-        for row in tbl.rows:
+try:
+    from ..extractors.enf27_extract import parse_enf27
+except ImportError:
+    try:
+        from extractors.enf27_extract import parse_enf27
+    except ImportError:
+        try:
+            from .enf27_extract import parse_enf27
+        except ImportError:
+            parse_enf27 = None  # type: ignore
+
+try:
+    from ..extractors.enf33_extract import parse_enf33
+except ImportError:
+    try:
+        from extractors.enf33_extract import parse_enf33
+    except ImportError:
+        try:
+            from .enf33_extract import parse_enf33
+        except ImportError:
+            parse_enf33 = None  # type: ignore
+
+try:
+    from ..extractors.tp182_extract import parse_tp182
+except ImportError:
+    try:
+        from extractors.tp182_extract import parse_tp182
+    except ImportError:
+        try:
+            from .tp182_extract import parse_tp182
+        except ImportError:
+            parse_tp182 = None  # type: ignore
+
+try:
+    from ..extractors.entp204_extract import parse_entp204
+except ImportError:
+    try:
+        from extractors.entp204_extract import parse_entp204
+    except ImportError:
+        try:
+            from .entp204_extract import parse_entp204
+        except ImportError:
+            parse_entp204 = None  # type: ignore
+
+try:
+    from ..extractors.rnse08_extract import parse_rnse08
+except ImportError:
+    try:
+        from extractors.rnse08_extract import parse_rnse08
+    except ImportError:
+        try:
+            from .rnse08_extract import parse_rnse08
+        except ImportError:
+            parse_rnse08 = None  # type: ignore
+
+try:
+    from ..extractors.enf34_pdf_extract import parse_enf34_pdf
+except ImportError:
+    try:
+        from extractors.enf34_pdf_extract import parse_enf34_pdf
+    except ImportError:
+        try:
+            from .enf34_pdf_extract import parse_enf34_pdf
+        except ImportError:
+            parse_enf34_pdf = None  # type: ignore
+
+try:
+    from ..extractors.tp186_extract import parse_tp186, _ensure_docx
+except ImportError:
+    try:
+        from extractors.tp186_extract import parse_tp186, _ensure_docx
+    except ImportError:
+        try:
+            from .tp186_extract import parse_tp186, _ensure_docx
+        except ImportError:
+            parse_tp186 = None  # type: ignore
+            _ensure_docx = None  # type: ignore
+
+try:
+    from ..extractors.enf17_extract import parse_ddr as parse_enf17
+except ImportError:
+    try:
+        from extractors.enf17_extract import parse_ddr as parse_enf17
+    except ImportError:
+        try:
+            from .enf17_extract import parse_ddr as parse_enf17
+        except ImportError:
+            parse_enf17 = None  # type: ignore
+
+
+def _clean(v) -> str:
+    """Clean cell value: strip whitespace, replace multiple spaces."""
+    if v is None:
+        return ""
+    s = str(v)
+    if s.strip() in ("#VALUE!", "#REF!", "#NAME?", "#N/A", "#DIV/0!", "#NULL!"):
+        return ""
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _cell(ws: Worksheet, row: int, col: int, lookup: dict) -> object:
+    """Get cell value, accounting for merged cells."""
+    v = ws.cell(row, col).value
+    return v if v is not None else lookup.get((row, col))
+
+
+def _build_merged_lookup(ws: Worksheet) -> dict:
+    """Build lookup dictionary for merged cell values."""
+    lookup = {}
+    for mr in ws.merged_cells.ranges:
+        av = ws.cell(mr.min_row, mr.min_col).value
+        for r in range(mr.min_row, mr.max_row + 1):
+            for c in range(mr.min_col, mr.max_col + 1):
+                if (r, c) != (mr.min_row, mr.min_col):
+                    lookup[(r, c)] = av
+    return lookup
+
+
+def _extract_doc_text(doc: Document) -> str:
+    """Extract all text from a Word document for format detection."""
+    parts = []
+    parts.extend(p.text for p in doc.paragraphs)
+    for table in doc.tables:
+        for row in table.rows:
             for cell in row.cells:
                 parts.append(cell.text)
-    blob = " || ".join(parts).upper()
-
-    # RNSE-08 — ENTP rig 188, RNSE wells.  French workover report with a
-    # "Déroulement des opérations" operations table and per-op tarif codes.
-    # Distinguishing markers: the operations-table title or RNSE well /
-    # TP 188 rig.
-    if ("DÉROULEMENT DES OPÉRATIONS" in blob
-            or "DEROULEMENT DES OPERATIONS" in blob
-            or re.search(r"\bRNSE[-\s]?\d", blob)
-            or "TP 188" in blob or "TP-188" in blob):
-        return "rnse08"
-
-    # TP-186 — ENTP rig 186, ZR wells, ZARZAITINE field, telex-style
-    # Word .doc/.docx.  Distinguishing markers:
-    #   - "RAPPORT JOURNALIER WORK-OVER" (hyphenated)
-    #   - "TP # 186" or "TP-186" or "TP 186"
-    #   - ZR# well prefix
-    if ("TP # 186" in blob or "TP-186" in blob or "TP 186" in blob
-            or re.search(r"\bZR\s*#\s*\d", blob)
-            or ("RAPPORT JOURNALIER WORK-OVER" in blob and "ZARZAITINE" in blob)):
-        return "tp186"
-
-    return "unknown"
+    return _clean(" ".join(parts)).upper()
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-def _detect_format(source) -> str:
-    """Single entry point for format detection.  Returns a rig key
-    like 'enf', 'tp182', 'enf34_pdf', etc.  Returns 'unknown' if the file
-    type or layout couldn't be identified."""
-    kind = _sniff_kind(source)
-    if kind == "pdf":
-        return _detect_format_pdf(source)
-    if kind == "xlsx":
-        return _detect_format_xlsx(source)
-    if kind in ("doc", "docx"):
-        return _detect_format_word(source)
-    return "unknown"
+def _extract_pdf_text(source: Union[Path, str, bytes]) -> str:
+    """Extract all text from a PDF source for format detection."""
+    try:
+        from io import BytesIO
+        import pdfplumber
+    except ImportError as exc:
+        raise ImportError(
+            "pdfplumber is required to detect and parse PDF sources."
+        ) from exc
 
-
-def parse_source(source: Union[Path, str, BytesIO]) -> dict:
-    """Detect the source format and call the right extractor.
-
-    Accepts both Excel (.xlsx) and PDF inputs.  Returns the standard
-    dict shape produced by all extractors (header / activities /
-    text_sections / mud_checks / mud_volume / mud_chemical_usage /
-    personnel_data / pumps / well_location / survey_data / safety /
-    tarif_totals) plus a "_meta" key with the source format and kind.
-    """
-    fmt = _detect_format(source)
-
-    # Excel-backed extractors
-    if fmt == "enf":
-        from extractors.enf17_extract import parse_ddr
-        data = parse_ddr(source)
-    elif fmt == "enf33":
-        from extractors.enf33_extract import parse_enf33
-        data = parse_enf33(source)
-    elif fmt == "tp179":
-        from extractors.tp179_extract import parse_tp179
-        data = parse_tp179(source)
-    elif fmt == "tp173":
-        from extractors.tp173_extract import parse_tp173
-        data = parse_tp173(source)
-    elif fmt == "tp183":
-        from extractors.tp183_extract import parse_tp183
-        data = parse_tp183(source)
-    elif fmt == "tp182":
-        from extractors.tp182_extract import parse_tp182
-        data = parse_tp182(source)
-    elif fmt == "tp195":
-        from extractors.tp195_extract import parse_tp195
-        data = parse_tp195(source)
-    elif fmt == "entp204":
-        from extractors.entp204_extract import parse_entp204
-        data = parse_entp204(source)
-    elif fmt == "gw29":
-        from extractors.gw29_extract import parse_gw29
-        data = parse_gw29(source)
-    elif fmt == "enf04":
-        from extractors.enf04_extract import parse_enf04
-        data = parse_enf04(source)
-
-    # PDF-backed extractors
-    elif fmt == "enf34_pdf":
-        from extractors.enf34_pdf_extract import parse_enf34_pdf
-        data = parse_enf34_pdf(source)
-
-    # Word-backed extractors (.doc auto-converted via LibreOffice → .docx)
-    elif fmt == "tp186":
-        from extractors.tp186_extract import parse_tp186
-        data = parse_tp186(source)
-    elif fmt == "rnse08":
-        from extractors.rnse08_extract import parse_rnse08
-        data = parse_rnse08(source)
-
+    if isinstance(source, bytes):
+        pdf_source = BytesIO(source)
     else:
-        raise ValueError(
-            f"Unrecognised report format. Markers in the file did not match "
-            f"any known rig layout. Add a new extractor module and register "
-            f"it in parse_source._detect_format_xlsx() or "
-            f"_detect_format_pdf()."
-        )
+        pdf_source = source
 
-    data.setdefault("_meta", {})["source_format"] = fmt
-    data["_meta"]["source_kind"] = _sniff_kind(source)
+    pdf = pdfplumber.open(pdf_source)
+    try:
+        pages_text = [p.extract_text() or "" for p in pdf.pages]
+    finally:
+        pdf.close()
 
-    # Universal bill-code normalization.  Different rig templates use
-    # different bill formats — some have clean codes ("T1"), others use
-    # multiplier prefixes ("1,05xT1", "0.95XT2").  The downstream insert
-    # function's strict regex ^T(\d+)$ only matches the clean form, so
-    # we normalize every activity's bill code here after the extractor
-    # runs.  Empty / unrecognized values are left as "" rather than
-    # silently mis-tagged.
-    from helpers.bill_code_assign import normalize_bill_code
-    for a in data.get("activities", []) or []:
-        raw = a.get("bill", "")
-        if raw:
-            a["bill"] = normalize_bill_code(raw)
-
-    return data
+    return _clean(" ".join(pages_text)).upper()
 
 
-def main(argv=None) -> int:
-    import argparse, json
-    from datetime import date as date_type, datetime, time, timedelta
+def _detect_format_pdf(source: Union[Path, str, bytes]) -> str | None:
+    """Detect the DWR format for a PDF document."""
+    text = _extract_pdf_text(source)
+    if ("GASSI-TOUIL" in text or "GASSI TOUIL" in text) and \
+            "RAPPORT JOURNALIER DE WORK OVER" in text:
+        return "enf34"
+    return None
 
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("source", type=Path)
-    p.add_argument("--json", action="store_true", help="dump the extracted dict")
-    args = p.parse_args(argv)
 
-    if not args.source.exists():
-        sys.exit(f"ERROR: source not found: {args.source}")
+def _detect_format_word(doc: Document) -> str | None:
+    """Detect the DWR format for a Word document."""
+    text = _extract_doc_text(doc)
+    if ("DÉROULEMENT DES OPÉRATIONS" in text or
+            "DEROULEMENT DES OPERATIONS" in text):
+        if "RNSE-" in text or "TP 188" in text or "TP-188" in text:
+            return "rnse08"
+    if "RAPPORT JOURNALIER WORK-OVER" in text or re.search(r"TP\s*#?\s*186", text):
+        return "tp186"
+    return None
 
-    fmt = _detect_format(args.source)
-    print(f"Detected format: {fmt}", file=sys.stderr)
 
-    if args.json:
-        data = parse_source(args.source)
-        def default(o):
-            if isinstance(o, (date_type, datetime)): return o.isoformat()
-            if isinstance(o, time): return o.strftime("%H:%M:%S")
-            if isinstance(o, timedelta): return o.total_seconds()
-            return str(o)
-        print(json.dumps(data, indent=2, default=default))
-    return 0
+def _detect_format_xlsx(ws: Worksheet) -> str | None:
+    """
+    Detect the DWR format based on worksheet content.
+    Returns format identifier: 'enf06', 'enf18', 'enf17', 'enf27', 'enf33', 'tp182', 'entp204', or None.
+    """
+    L = _build_merged_lookup(ws)
+    
+    # Helper to get cleaned cell value
+    def get_cell(r, c):
+        return _clean(_cell(ws, r, c, L))
+
+    def _make_search_text(max_rows=40, max_cols=20):
+        parts = []
+        for r in range(1, min(ws.max_row, max_rows) + 1):
+            for c in range(1, min(ws.max_column, max_cols) + 1):
+                parts.append(get_cell(r, c).upper())
+        return " ".join(parts)
+
+    sheet_text = _make_search_text()
+    if "TXNO" in sheet_text or "AIN TSILA" in sheet_text or "AIN T'SILA" in sheet_text:
+        return "entp204"
+    if "WELL :" in sheet_text and "WIH" in sheet_text and "RIG NAME" in sheet_text and "TOTAL MD" in sheet_text:
+        return "tp182"
+    if ("RIG.S.I" in sheet_text or "ENF # 33" in sheet_text or "ENF#33" in sheet_text) and "DAILY DRILLING REPORT" in sheet_text:
+        return "enf33"
+    if re.search(r"ENF\s*#?\s*17\b", sheet_text, re.IGNORECASE) and "DAILY DRILLING REPORT" in sheet_text:
+        return "enf17"
+
+    # Scan key areas for distinguishing markers
+    
+    # Check for ENF#06 markers
+    # - "E.NA.FOR" + "DAILY WORKOVER REPORT"
+    # - "ENF# 06" or "ENF#06"
+    # - "TP.Senior" + "TP.Junior" headers
+    # - "Timing" + "MUD PUMPS DATA" ops headers
+    
+    # Look for E.NA.FOR pattern in title area (rows 2-5, cols A-I)
+    title_found = False
+    for r in range(1, 6):  # rows 1-5 (0-indexed as 1-5 in 1-based)
+        for c in range(1, 10):  # cols A-I (1-9)
+            val = get_cell(r, c)
+            if "E.NA.FOR" in val.upper():
+                # Check for DAILY WORKOVER REPORT nearby
+                for r2 in range(max(1, r-2), min(ws.max_row+1, r+3)):
+                    for c2 in range(max(1, c-2), min(ws.max_column+1, c+3)):
+                        if "DAILY WORKOVER REPORT" in get_cell(r2, c2).upper():
+                            title_found = True
+                            break
+                    if title_found:
+                        break
+                if title_found:
+                    break
+        if title_found:
+            break
+    
+    if title_found:
+        # Additional ENF#06 checks
+        enf06_rig = False
+        tp_senior_junior = False
+        timing_mud_pumps = False
+        
+        # Check for ENF#06 rig designation
+        for r in range(1, 10):
+            for c in range(1, 10):
+                val = get_cell(r, c)
+                if re.search(r"ENF\s*#?\s*06", val, re.IGNORECASE):
+                    enf06_rig = True
+                    break
+            if enf06_rig:
+                break
+        
+        # Check for TP.Senior/TP.Junior in the top area; they may appear on
+        # different rows in some ENF#06 variants.
+        tp_senior_present = False
+        tp_junior_present = False
+        for r in range(1, 10):
+            row_vals = [get_cell(r, c) for c in range(1, 10)]
+            row_str = " ".join(row_vals).upper()
+            if "TP.SENIOR" in row_str:
+                tp_senior_present = True
+            if "TP.JUNIOR" in row_str:
+                tp_junior_present = True
+            if tp_senior_present and tp_junior_present:
+                tp_senior_junior = True
+                break
+        
+        # Check for Timing + MUD PUMPS DATA
+        for r in range(1, 15):
+            row_vals = [get_cell(r, c) for c in range(1, 20)]
+            row_str = " ".join(row_vals)
+            if "TIMING" in row_str.upper() and "MUD PUMPS DATA" in row_str.upper():
+                timing_mud_pumps = True
+                break
+        
+        if enf06_rig and (tp_senior_junior or timing_mud_pumps):
+            return "enf06"
+    
+    # Check for ENF#18 markers
+    # - "ENF#18" or "ENF # 18" rig name
+    # - well "MD " prefix + HMD field + "Rapport journalier work-over"
+    
+    enf18_rig = False
+    md_hmd_workover = False
+    
+    # Check for ENF#18 rig designation
+    for r in range(1, 15):
+        for c in range(1, 20):
+            val = get_cell(r, c)
+            if re.search(r"ENF\s*#?\s*18", val, re.IGNORECASE):
+                enf18_rig = True
+                break
+        if enf18_rig:
+            break
+    
+    # Check for MD well + HMD field + work-over
+    well_name = ""
+    field_name = ""
+    work_over_title = ""
+    
+    # Well name typically around B6-E6 area
+    for r in [5, 6]:  # rows 5-6 (1-based 6-7)
+        for c in [2, 3, 4, 5]:  # cols B-E (2-5)
+            val = get_cell(r, c)
+            if val and len(val) > 3 and not val.isdigit():
+                if not well_name:
+                    well_name = val
+    
+    # Field name typically around E6 area
+    for r in [5, 6]:
+        for c in [4, 5, 6]:  # cols D-F (4-6)
+            val = get_cell(r, c)
+            if val and ("HMD" in val.upper() or "HASSI" in val.upper()):
+                field_name = val
+    
+    # Work-over title
+    for r in [2, 3, 4]:
+        for c in [1, 2, 3, 4, 5, 6, 7]:  # cols A-G
+            val = get_cell(r, c)
+            if "RAPPORT" in val.upper() and ("WORK" in val.upper() or "OVER" in val.upper()):
+                work_over_title = val
+    
+    if well_name and field_name and work_over_title:
+        if "MD" in well_name.upper() and "HMD" in field_name.upper():
+            md_hmd_workover = True
+    
+    if enf18_rig or md_hmd_workover:
+        return "enf18"
+    
+    # Check for ENF#27 markers
+    # - "ENF 27" or "ENF#27" rig name
+    # - "DIRECTION REGIONALE OHANET"
+    # - well "DIMW-" prefix
+    
+    enf27_rig = False
+    ohANET_direction = False
+    dimw_well = False
+    
+    # Check for ENF#27 rig designation
+    for r in range(1, 15):
+        for c in range(1, 20):
+            val = get_cell(r, c)
+            if re.search(r"ENF\s*#?\s*27", val, re.IGNORECASE):
+                enf27_rig = True
+                break
+        if enf27_rig:
+            break
+    
+    # Check for DIRECTION REGIONALE OHANET
+    for r in range(1, 10):
+        for c in range(1, 15):
+            val = get_cell(r, c)
+            if "DIRECTION" in val.upper() and "REGIONALE" in val.upper() and "OHANET" in val.upper():
+                ohANET_direction = True
+                break
+        if ohANET_direction:
+            break
+    
+    # Check for DIMW- well prefix
+    well_name_27 = ""
+    for r in [4, 5]:  # rows 4-5 (1-based 5-6)
+        for c in [1, 2, 3]:  # cols A-C (1-3)
+            val = get_cell(r, c)
+            if val and ("DIMW" in val.upper() or val.startswith("DIMW-")):
+                dimw_well = True
+                break
+        if dimw_well:
+            break
+    
+    if enf27_rig and (ohANET_direction or dimw_well):
+        return "enf27"
+    
+    return None
+
+
+def parse_source(source: Union[Path, str, bytes]) -> dict:
+    """
+    Main entry point: detect format and dispatch to appropriate extractor.
+    
+    Args:
+        source: File path, string, or bytes of the Excel or Word file
+        
+    Returns:
+        dict: Extracted data in standard format
+        
+    Raises:
+        ValueError: If format cannot be detected or extractor not available
+    """
+    source_path = None
+    format_id = None
+    doc = None
+    wb = None
+
+    if isinstance(source, bytes):
+        from io import BytesIO
+        stream = BytesIO(source)
+        try:
+            wb = load_workbook(stream, data_only=True)
+            ws = wb.active
+            format_id = _detect_format_xlsx(ws)
+        except InvalidFileException:
+            stream.seek(0)
+            try:
+                format_id = _detect_format_pdf(stream)
+            except ImportError:
+                format_id = None
+            if format_id is None:
+                stream.seek(0)
+                try:
+                    doc = Document(stream)
+                except Exception:
+                    stream.seek(0)
+                    with tempfile.NamedTemporaryFile(suffix='.doc', delete=False) as tf:
+                        tf.write(stream.read())
+                        tmp_path = Path(tf.name)
+                    if _ensure_docx is None:
+                        raise ValueError(
+                            "Cannot parse Word document bytes: LibreOffice conversion is unavailable."
+                        )
+                    doc = Document(str(_ensure_docx(tmp_path)))
+                format_id = _detect_format_word(doc)
+    else:
+        source_path = Path(source)
+        suffix = source_path.suffix.lower()
+        if suffix in ('.doc', '.docx'):
+            if suffix == '.doc':
+                if _ensure_docx is None:
+                    raise ValueError(
+                        "Cannot parse .doc file: LibreOffice conversion is unavailable."
+                    )
+                doc = Document(str(_ensure_docx(source_path)))
+            else:
+                doc = Document(str(source_path))
+            format_id = _detect_format_word(doc)
+        elif suffix == '.pdf':
+            try:
+                format_id = _detect_format_pdf(source_path)
+            except ImportError as exc:
+                raise ValueError(
+                    "Cannot parse PDF file: pdfplumber is required."
+                ) from exc
+        else:
+            if suffix not in ('.xlsx', '.xls', '.xlsm', '.xltx', '.xltm'):
+                raise ValueError(
+                    f"Unsupported source file type: {suffix!r}. "
+                    "Supported formats: .xlsx, .xlsm, .xltx, .xltm, .doc, .docx, .pdf"
+                )
+            try:
+                wb = load_workbook(source_path, data_only=True)
+            except InvalidFileException as exc:
+                raise ValueError(
+                    f"Unsupported source file type: {suffix!r}. "
+                    "Supported formats: .xlsx, .xlsm, .xltx, .xltm, .doc, .docx, .pdf"
+                ) from exc
+            ws = wb.active
+            format_id = _detect_format_xlsx(ws)
+    
+    # Dispatch to appropriate extractor
+    if format_id == "enf06" and parse_enf06 is not None:
+        result = parse_enf06(source)
+    elif format_id == "enf18" and parse_enf08 is not None:  # enf08 handles ENF#18
+        result = parse_enf08(source)
+    elif format_id == "enf27" and parse_enf27 is not None:
+        result = parse_enf27(source)
+    elif format_id == "enf33" and parse_enf33 is not None:
+        result = parse_enf33(source)
+    elif format_id == "enf17" and parse_enf17 is not None:
+        result = parse_enf17(source)
+    elif format_id == "tp182" and parse_tp182 is not None:
+        result = parse_tp182(source)
+    elif format_id == "entp204" and parse_entp204 is not None:
+        result = parse_entp204(source)
+    elif format_id == "enf34" and parse_enf34_pdf is not None:
+        result = parse_enf34_pdf(source)
+    elif format_id == "rnse08" and parse_rnse08 is not None:
+        result = parse_rnse08(source)
+    elif format_id == "tp186" and parse_tp186 is not None:
+        result = parse_tp186(source)
+    else:
+        if isinstance(source, bytes):
+            wb = None
+        else:
+            wb = load_workbook(source_path, data_only=True) if source_path.suffix.lower() in ('.xlsx', '.xls', '.xlsm', '.xltx', '.xltm') else None
+        available = []
+        if parse_enf06 is not None:
+            available.append("enf06")
+        if parse_enf08 is not None:
+            available.append("enf18")
+        if parse_enf27 is not None:
+            available.append("enf27")
+        if parse_enf33 is not None:
+            available.append("enf33")
+        if parse_enf17 is not None:
+            available.append("enf17")
+        if parse_tp182 is not None:
+            available.append("tp182")
+        if parse_entp204 is not None:
+            available.append("entp204")
+        if parse_enf34_pdf is not None:
+            available.append("enf34")
+        if parse_rnse08 is not None:
+            available.append("rnse08")
+        if parse_tp186 is not None:
+            available.append("tp186")
+        
+        if format_id is None:
+            raise ValueError(
+                f"Could not detect DWR format. Available extractors: {available}"
+            )
+        else:
+            raise ValueError(
+                f"Format '{format_id}' detected but no extractor available. "
+                f"Available extractors: {available}"
+            )
+    if 'wb' in locals() and wb is not None:
+        wb.close()
+    return result
+
+
+# Drop-in compat for direct Excel parsing
+parse_daily_excel_report = parse_source
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import sys
+    import json
+    
+    if len(sys.argv) < 2:
+        print("Usage: python parse_source.py SOURCE.xlsx")
+        sys.exit(1)
+    
+    try:
+        data = parse_source(Path(sys.argv[1]))
+        print(json.dumps(data, indent=2, default=str, ensure_ascii=False))
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
