@@ -71,6 +71,30 @@ for op in data["activities"]:
     print(op["start_time"], op["end_time"], op["bill"], op["description"])
 ```
 
+### Batch processing
+
+```bash
+# Process a mix of sources and write a ZIP per source next to the input file
+python batch_to_router_excel.py report.xlsx report.pdf report.docx
+
+# Process all supported files in a directory recursively
+python batch_to_router_excel.py reports --recursive
+
+# Write every output ZIP into a dedicated directory
+python batch_to_router_excel.py reports -o outputs
+```
+
+Each successful source produces its own ZIP archive containing a single
+`*_router.xlsx` file. Unsupported or unrecognized inputs are skipped with a
+warning, while errors are reported per file.
+
+### Notes
+
+- Supported input formats: `.xlsx`, `.xls`, `.pdf`, `.doc`, `.docx`
+- If `--output-dir` is omitted, each ZIP is written next to its source file.
+    print(op["start_time"], op["end_time"], op["bill"], op["description"])
+```
+
 ## Supported formats
 
 | Module               | Rig    | Source type | Template                        |
