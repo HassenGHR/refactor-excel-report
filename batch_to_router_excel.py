@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-batch_to_router_excel.py — process every .xlsx / .pdf in a directory
+batch_to_router_excel.py — process a list of report files or directories
 through the same pipeline as to_router_excel.py.
 
 Usage:
-    python batch_to_router_excel.py INPUT_DIR
+    python batch_to_router_excel.py REPORT1.xlsx REPORT2.pdf report.docx
     python batch_to_router_excel.py INPUT_DIR -o OUTPUT_DIR
     python batch_to_router_excel.py INPUT_DIR --recursive
-    python batch_to_router_excel.py INPUT_DIR --pattern "*.pdf"   # PDFs only
+    python batch_to_router_excel.py "*.xlsx" "*.pdf"
 
 Each input file is routed through helpers.parse_source.parse_source which
 auto-detects its rig template. Files whose format isn't recognized are
 skipped with a warning rather than aborting the batch.
 
-All successfully generated router Excel files are collected into a single
-ZIP archive (router_batch_YYYY-MM-DD_HHMM.zip) in the output directory.
-The archive contains the individual .xlsx files (not further zipped).
+For each successful source, a separate ZIP archive is created containing
+its single router-facing .xlsx output.
 """
 from __future__ import annotations
 import argparse
@@ -24,26 +23,35 @@ import zipfile
 from pathlib import Path
 from typing import List, Tuple
 
-from to_router_excel import build_router_excel, _ensure_date, parse_ddr, make_router_excel_bytes
+from to_router_excel import _ensure_date, parse_ddr, make_router_excel_bytes
 from datetime import datetime, date as date_type
 
 
 SUPPORTED_SUFFIXES = (".xlsx", ".xls", ".pdf", ".doc", ".docx")
 
 
-def _iter_sources(input_dir: Path, recursive: bool, pattern: str) -> List[Path]:
-    """Find all candidate source files in input_dir."""
-    if recursive:
-        matches = sorted(input_dir.rglob(pattern))
-    else:
-        matches = sorted(input_dir.glob(pattern))
-    # Filter to supported file types (router_ready outputs are skipped)
-    return [
-        p for p in matches
-        if p.is_file()
-        and p.suffix.lower() in SUPPORTED_SUFFIXES
-        and "_router" not in p.stem.lower()        # skip our own outputs
-    ]
+def _iter_sources(inputs: List[Path], recursive: bool, pattern: str) -> List[Path]:
+    """Find all candidate source files from files and directories."""
+    sources: List[Path] = []
+    for entry in inputs:
+        if entry.is_dir():
+            if recursive:
+                matches = sorted(entry.rglob(pattern))
+            else:
+                matches = sorted(entry.glob(pattern))
+            sources.extend(
+                p for p in matches
+                if p.is_file()
+                and p.suffix.lower() in SUPPORTED_SUFFIXES
+                and "_router" not in p.stem.lower()
+            )
+        elif entry.is_file():
+            if (entry.suffix.lower() in SUPPORTED_SUFFIXES
+                    and "_router" not in entry.stem.lower()):
+                sources.append(entry)
+        else:
+            print(f"Warning: input path not found or unsupported: {entry}")
+    return sources
 
 
 def _process_one(source: Path) -> dict:
@@ -77,43 +85,54 @@ def _process_one(source: Path) -> dict:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
-        description="Batch-convert a directory of rig reports to "
-                    "router-ready Excel files, delivered as one ZIP archive "
-                    "containing all the .xlsx files."
+        description="Batch-convert report files to router-ready Excel files, "
+                    "with each output packaged into its own ZIP archive."
     )
-    p.add_argument("input_dir", type=Path,
-                    help="Directory containing source .xlsx/.pdf files")
+    p.add_argument("inputs", type=Path, nargs="+",
+                    help="Input files or directories containing report sources")
     p.add_argument("-o", "--output-dir", type=Path, default=None,
-                    help="Directory where the final ZIP archive will be written "
-                         "(default: same as input_dir)")
+                    help="Directory where individual output ZIP archives will be written. "
+                         "If omitted, each ZIP is written next to its source file.")
     p.add_argument("-r", "--recursive", action="store_true",
                    help="Recurse into subdirectories")
     p.add_argument("--pattern", default="*",
                    help="Glob pattern to match (default: *)")
     args = p.parse_args(argv)
 
-    if not args.input_dir.exists() or not args.input_dir.is_dir():
-        sys.exit(f"ERROR: input dir not found: {args.input_dir}")
+    missing = [p for p in args.inputs if not p.exists()]
+    if missing:
+        sys.exit(f"ERROR: input path(s) not found: {', '.join(str(p) for p in missing)}")
 
-    output_dir = args.output_dir or args.input_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if args.output_dir:
+        output_dir = args.output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    sources = _iter_sources(args.input_dir, args.recursive, args.pattern)
+    sources = _iter_sources(args.inputs, args.recursive, args.pattern)
     if not sources:
-        print(f"No source files found in {args.input_dir} (pattern {args.pattern!r}).")
+        print(f"No source files found. Checked inputs: {', '.join(str(p) for p in args.inputs)}")
         return 0
 
-    print(f"Found {len(sources)} file(s); will create ZIP archive in {output_dir}")
+    if args.output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Found {len(sources)} file(s); will write ZIP archives to {output_dir}")
+    else:
+        print(f"Found {len(sources)} file(s); will write ZIP archives next to each source file")
     print()
 
     ok = skipped = errored = 0
-    results = []
     for src in sources:
         result = _process_one(src)
-        results.append(result)
         if result["status"] == "ok":
             ok += 1
-            print(f"  ✓  {src.name}  →  {result['inner']}  "
+            output_target_dir = args.output_dir or src.parent
+            output_target_dir.mkdir(parents=True, exist_ok=True)
+            date_str = result.get("date") or "out"
+            zip_name = f"{src.stem}_{date_str}_router.zip"
+            zip_path = output_target_dir / zip_name
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr(result["inner"], result["bytes"])
+
+            print(f"  ✓  {src.name}  →  {zip_path.name}  "
                   f"[{result['format']}, {result['activities']} ops, {result['date']}]")
         elif result["status"] == "skipped":
             skipped += 1
@@ -121,21 +140,6 @@ def main(argv=None) -> int:
         else:
             errored += 1
             print(f"  ✗  {src.name}: ERROR — {result['error']}")
-
-    # Package all successful .xlsx into one ZIP archive
-    goods: List[Tuple[str, bytes]] = [
-        (r["inner"], r["bytes"]) for r in results
-        if r["status"] == "ok" and "bytes" in r
-    ]
-    if goods:
-        ts = datetime.now().strftime("%Y-%m-%d_%H%M")
-        zip_name = f"router_batch_{ts}.zip"
-        zip_path = output_dir / zip_name
-        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for inner, content in goods:
-                zf.writestr(inner, content)
-        print()
-        print(f"Created ZIP archive: {zip_path}  (contains {len(goods)} Excel file(s))")
 
     print()
     print(f"Summary: {ok} succeeded, {skipped} skipped, {errored} errored "
