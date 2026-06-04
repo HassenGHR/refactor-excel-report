@@ -5,7 +5,7 @@ appropriate extractor.
 
 Accepts both Excel sources (.xlsx — most rigs) and PDF sources (some rigs
 deliver their daily reports as PDF instead of Excel). The file type is
-sniffed from the first few bytes (PDF starts with %PDF-, xlsx with PK\x03)
+sniffed from the first few bytes (PDF starts with %PDF-, xlsx with PK\\x03)
 so callers don't need to declare the format up front.
 
 Usage (programmatic):
@@ -185,7 +185,7 @@ def _detect_format_pdf(source) -> str:
 
     Reads the first 2 pages and scans for distinguishing marker phrases.
     pdfplumber is imported lazily so the module still loads on systems
-    without it when only Excel/PDF sources are used.
+    without it when only Excel sources are used.
     """
     import pdfplumber
 

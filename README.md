@@ -17,7 +17,7 @@ FastAPI `/v1/excel_import/upload` endpoint can ingest.
 │   ├── enf33_extract.py        # ENAFOR rig 33, BERKINE/BKNS DDR (.xlsm)
 │   ├── enf04_extract.py        # ENAFOR rig 04, Haoud Berkaoui (2 layouts)
 │   ├── enf34_pdf_extract.py    # ENAFOR rig 34, Gassi-Touil PDF
-│   ├── gw29_extract.py         # GWDC rig 29, REB
+│   ├── gw29_extract.py         # GW-29 / TP-127 layout family (GWDC REB + DRAA DAOUI)
 │   ├── tp173_extract.py        # ENTP rig 173, ADRAR / ODZ wells
 │   ├── tp179_extract.py        # ENTP rig 179, ADRAR / HTJW wells
 │   ├── tp182_extract.py        # ENTP rig 182, SONATRACH / WIH wells
@@ -29,7 +29,7 @@ FastAPI `/v1/excel_import/upload` endpoint can ingest.
 ├── helpers/
 │   ├── __init__.py
 │   ├── bill_code_assign.py     # Bill-code partitioning + normalization
-│   └── parse_source.py         # Format detection + dispatcher
+│   └── parse_source.py         # Magic-byte sniffing, format detection, dispatcher
 ├── to_router_excel.py          # Single-file CLI
 ├── batch_to_router_excel.py    # Batch processor (planned)
 ├── requirements.txt
@@ -92,8 +92,6 @@ warning, while errors are reported per file.
 
 - Supported input formats: `.xlsx`, `.xls`, `.pdf`, `.doc`, `.docx`
 - If `--output-dir` is omitted, each ZIP is written next to its source file.
-    print(op["start_time"], op["end_time"], op["bill"], op["description"])
-```
 
 ## Supported formats
 
@@ -113,7 +111,7 @@ warning, while errors are reported per file.
 | rnse08_extract       | TP-188 | .doc, .docx | RNSE wells, ops-table format     |
 | tp195_extract        | TP-195 | .xlsx       | AIN T'SILA, OFFICE REP           |
 | entp204_extract      | ENTP-204 | .xlsx      | AIN T'SILA, TXNO, LABEL:value    |
-| gw29_extract         | GW29   | .xlsx       | GWDC REB                         |
+| gw29_extract         | GW29 / TP-127 | .xlsx  | GWDC REB · TP-127 DRAA DAOUI     |
 | enf34_pdf_extract    | ENF#34 | .pdf        | Gassi-Touil PDF                  |
 
 ### Word .doc support
