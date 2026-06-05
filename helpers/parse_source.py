@@ -128,6 +128,16 @@ def _detect_format_xlsx(source) -> str:
     if "TP 183" in blob or "TP-183" in blob or re.search(r"\bTMLS\b", blob):
         return "tp183"
 
+    # ENTP-127 — English-template daily work-over report (ENTP DF rig,
+    # DAD wells, DRAA DAOUI field).  Distinguishing markers vs the French
+    # GW29/TP-127 template: "ENTP   DF" in A1 (rendered as "ENTP  DF" or
+    # with extra spaces) and English-only labels "TOOL PUSHER" / "LAST BOP
+    # TEST" in the header area.  Must be checked BEFORE gw29 since the gw29
+    # block matches "TP 127" which also appears here.
+    if (re.search(r"ENTP\s+DF", blob)
+            and ("TOOL PUSHER" in blob or "LAST BOP TEST" in blob)):
+        return "entp127"
+
     # GW29 layout family — French "Rapport journalier de Work - Over" with
     # the AVANCEMENT / OUTILS / USURE / PARAMETRES section headers at row 3
     # and the wide header in rows 1-2 (label/value pairs).  Originally for
@@ -344,6 +354,9 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
     elif fmt == "entp204":
         from extractors.entp204_extract import parse_entp204
         data = parse_entp204(source)
+    elif fmt == "entp127":
+        from extractors.entp127_extract import parse_tp127
+        data = parse_tp127(source)
     elif fmt == "gw29":
         from extractors.gw29_extract import parse_gw29
         data = parse_gw29(source)

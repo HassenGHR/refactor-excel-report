@@ -17,7 +17,8 @@ FastAPI `/v1/excel_import/upload` endpoint can ingest.
 │   ├── enf33_extract.py        # ENAFOR rig 33, BERKINE/BKNS DDR (.xlsm)
 │   ├── enf04_extract.py        # ENAFOR rig 04, Haoud Berkaoui (2 layouts)
 │   ├── enf34_pdf_extract.py    # ENAFOR rig 34, Gassi-Touil PDF
-│   ├── gw29_extract.py         # GW-29 / TP-127 layout family (GWDC REB + DRAA DAOUI)
+│   ├── entp127_extract.py      # ENTP DF rig 127, DAD wells, English template
+│   ├── gw29_extract.py         # GW-29 / TP-127 layout family — French template (GWDC REB + DRAA DAOUI)
 │   ├── tp173_extract.py        # ENTP rig 173, ADRAR / ODZ wells
 │   ├── tp179_extract.py        # ENTP rig 179, ADRAR / HTJW wells
 │   ├── tp182_extract.py        # ENTP rig 182, SONATRACH / WIH wells
@@ -111,7 +112,8 @@ warning, while errors are reported per file.
 | rnse08_extract       | TP-188 | .doc, .docx | RNSE wells, ops-table format     |
 | tp195_extract        | TP-195 | .xlsx       | AIN T'SILA, OFFICE REP           |
 | entp204_extract      | ENTP-204 | .xlsx      | AIN T'SILA, TXNO, LABEL:value    |
-| gw29_extract         | GW29 / TP-127 | .xlsx  | GWDC REB · TP-127 DRAA DAOUI     |
+| entp127_extract      | ENTP TP-127 | .xlsx   | DAD wells, DRAA DAOUI, English   |
+| gw29_extract         | GW29 / TP-127 | .xlsx  | GWDC REB · TP-127 DRAA DAOUI (French) |
 | enf34_pdf_extract    | ENF#34 | .pdf        | Gassi-Touil PDF                  |
 
 ### Word .doc support
