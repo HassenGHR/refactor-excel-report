@@ -110,6 +110,10 @@ def parse_enf34_pdf(source: Union[Path, str, BytesIO]) -> dict:
         pages_text = [p.extract_text() or "" for p in pdf.pages]
         # Pre-extract tables once (slow operation)
         pages_tables = [p.extract_tables() or [] for p in pdf.pages]
+        # Extract words from page 4 — the cost table here is rendered as
+        # individual characters in a complex column layout that pdfplumber
+        # cannot parse into tables; word-level bounding boxes work reliably.
+        cost_words = pdf.pages[3].extract_words() if len(pdf.pages) > 3 else []
     finally:
         pdf.close()
 
@@ -254,45 +258,11 @@ def parse_enf34_pdf(source: Union[Path, str, BytesIO]) -> dict:
 
     # =====================================================================
     # COSTS  (page 4 — "ANALYSE DES COUTS")
+    # The cost table in this PDF is rendered as individual characters in a
+    # complex multi-column layout that pdfplumber cannot parse as a table
+    # (pages_tables[3] is always empty).  Use word-level bounding boxes.
     # =====================================================================
-    tarif_totals = {}
-    daily_cost_total = 0
-    cum_cost_total   = 0
-    if len(pages_tables) > 3:
-        for tbl in pages_tables[3]:
-            if not tbl: continue
-            head = " ".join(str(c) for c in tbl[0] if c).upper()
-            if "TEMPS" in head and "MONTANT" in head:
-                # Cost-by-bill table
-                for row in tbl[1:]:
-                    if not row: continue
-                    cells = [_clean(c) if c else "" for c in row]
-                    if not cells: continue
-                    label = cells[0].upper() if cells[0] else ""
-                    if label in ("T1", "T2", "T3", "T4"):
-                        # Hours in col 1, hourly cost col 2, total DA in last col
-                        try:
-                            hrs = _float(cells[1]) if len(cells) > 1 else 0.0
-                            tarif_totals[label.lower()] = hrs
-                        except Exception:
-                            pass
-                        try:
-                            tarif_totals[f"{label.lower()}_amount"] = _money_to_int(cells[-1])
-                        except Exception:
-                            pass
-                    elif "TOTAL JOURNALIER" in label:
-                        daily_cost_total = _money_to_int(cells[-1])
-                    elif "CUMUL" in label and "DTM" in label:
-                        cum_cost_total = _money_to_int(cells[-1])
-            elif "NATURE DES CHARGES" in head:
-                # Service-cost table — pick up cum services + grand totals
-                for row in tbl[1:]:
-                    if not row: continue
-                    cells = [_clean(c) if c else "" for c in row]
-                    label = cells[0].upper() if cells and cells[0] else ""
-                    if "CUMUL APPAREIL & SERVICES AU" in label:
-                        # This is the grand total cumulative including services
-                        cum_cost_total = max(cum_cost_total, _money_to_int(cells[-1]))
+    tarif_totals, daily_cost_total, cum_cost_total = _extract_costs_by_words(cost_words)
 
     if daily_cost_total: header["daily_cost"] = daily_cost_total
     if cum_cost_total:   header["cum_cost"]   = cum_cost_total
@@ -331,6 +301,79 @@ def parse_enf34_pdf(source: Union[Path, str, BytesIO]) -> dict:
         "safety": {},
         "tarif_totals": tarif_totals,
     }
+
+
+# ---------------------------------------------------------------------------
+# Cost extraction (page 4) — word-coordinate approach
+# ---------------------------------------------------------------------------
+def _extract_costs_by_words(words: list):
+    """
+    Parse T1/T2/T3/T4 hours, DA amounts, and daily/cumulative totals from
+    the word list of page 4.
+
+    The cost table in this PDF is drawn with characters as individual PDF
+    text objects arranged in columns; pdfplumber returns 0 tables.  Instead
+    we bucket words by Y position (±8 px tolerance), reconstruct each row's
+    text left-to-right, and identify T-code rows and total rows by X range.
+
+    Column X ranges (empirical, points):
+      Row-label column  :  x < 200
+      NBRES HEURES      : 195 ≤ x ≤ 255
+      MONTANT (DA)      : 440 ≤ x ≤ 520
+    """
+    if not words:
+        return {}, 0, 0
+
+    # --- Group words into rows (Y ± 8 px) ---
+    rows = []  # each entry: [center_y, [(x, text), ...]]
+    for w in sorted(words, key=lambda w: w["top"]):
+        y, x, text = w["top"], w["x0"], w["text"]
+        merged = False
+        for row in rows:
+            if abs(y - row[0]) <= 8:
+                row[1].append((x, text))
+                merged = True
+                break
+        if not merged:
+            rows.append([y, [(x, text)]])
+
+    def _chars_in(items, x_lo, x_hi):
+        return "".join(t for x, t in sorted(items, key=lambda i: i[0])
+                       if x_lo <= x <= x_hi)
+
+    tarif_totals: dict = {}
+    daily_cost_total = 0
+    cum_cost_total   = 0
+
+    for _row_y, items in rows:
+        # T1/T2/T3/T4 rows: "T" + digit in x 85-115
+        t_text = _chars_in(items, 85, 115).replace(" ", "")
+        m = re.match(r"T([1-4])$", t_text, re.IGNORECASE)
+        if m:
+            code = f"T{m.group(1)}"
+            hrs_text  = _chars_in(items, 195, 255)
+            amt_text  = _chars_in(items, 440, 520)
+            hrs = _float(hrs_text)
+            if hrs > 0:
+                tarif_totals[code.lower()] = hrs
+            amt = _money_to_int(amt_text)
+            if amt:
+                tarif_totals[f"{code.lower()}_amount"] = amt
+            continue
+
+        # Total / cumul rows: label in x < 200, amount in x > 440
+        label = _chars_in(items, 0, 200).lower().replace(" ", "")
+        if not label:
+            continue
+        amt_text = _chars_in(items, 440, 520)
+        amt = _money_to_int(amt_text)
+
+        if "totaljournalier" in label and "service" not in label:
+            daily_cost_total = max(daily_cost_total, amt)
+        elif "cumulappareil" in label and "service" in label:
+            cum_cost_total = max(cum_cost_total, amt)
+
+    return tarif_totals, daily_cost_total, cum_cost_total
 
 
 # ---------------------------------------------------------------------------

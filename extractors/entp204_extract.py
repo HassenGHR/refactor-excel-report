@@ -123,6 +123,65 @@ def _build_merged_lookup(ws):
     return lookup
 
 
+def _build_span_end_cols(ws):
+    """Map every (row, col) inside a merged range to that range's LAST
+    column index (inclusive), so we can jump past a label's own merge in
+    one step when looking for an adjacent value cell."""
+    spans = {}
+    for mr in ws.merged_cells.ranges:
+        for r in range(mr.min_row, mr.max_row + 1):
+            for c in range(mr.min_col, mr.max_col + 1):
+                spans[(r, c)] = mr.max_col
+    return spans
+
+
+def _scan_label_cell(ws, L, S, label, row_range=(1, 65), col_range=(1, 20)):
+    """Find a cell whose text starts with LABEL, and return its RAW value
+    (unconverted — could be str/datetime/timedelta/int) plus the matched
+    (row, col).
+
+    Handles BOTH layouts seen across this template's variants:
+      - combined:  one cell reads "LABEL : value" — the trailing text
+        after the label (and optional colon) is returned as a string.
+      - split:     the label cell holds ONLY the label (e.g. "DATE ",
+        "REP N° ", "T1 =") with the real value living in the very next
+        cell after the label's own merged span (e.g. a separate
+        datetime/int/timedelta cell).
+
+    Returns (None, None, None) if the label isn't found."""
+    rx = re.compile(rf"^{re.escape(label)}\s*[:：=]?\s*(.*)$", re.IGNORECASE)
+    for r in range(row_range[0], row_range[1] + 1):
+        for c in range(col_range[0], col_range[1] + 1):
+            v = _cell(ws, r, c, L)
+            if v is None or not isinstance(v, str):
+                continue
+            m = rx.match(_clean(v))
+            if not m:
+                continue
+            trailing = m.group(1).strip()
+            if trailing:
+                return trailing, r, c
+            end_c = S.get((r, c), c)
+            nv = _cell(ws, r, end_c + 1, L)
+            if nv is not None and _clean(str(nv)) != "":
+                return nv, r, c
+            return None, r, c
+    return None, None, None
+
+
+def _hours_from_any(v) -> float:
+    """Convert a tariff-hours value to decimal hours, whichever form it
+    takes on this template: a timedelta (split-cell layout), or a string
+    like '24h00' / '00h00' / 'CUM 00h00' (combined-cell layout)."""
+    if v is None:
+        return 0.0
+    if isinstance(v, timedelta):
+        return v.total_seconds() / 3600.0
+    if isinstance(v, (int, float)):
+        return float(v)
+    return _hhmm_to_hours(str(v))
+
+
 def _cell(ws, r, c, lookup):
     v = ws.cell(r, c).value
     return v if v is not None else lookup.get((r, c))
@@ -224,6 +283,7 @@ def parse_entp204(source: Union[Path, str, BytesIO]) -> dict:
         wb = load_workbook(source, data_only=True)
     ws = wb.active
     L = _build_merged_lookup(ws)
+    S = _build_span_end_cols(ws)
 
     header = {}
 
@@ -233,14 +293,20 @@ def parse_entp204(source: Union[Path, str, BytesIO]) -> dict:
     well = _scan_label_value(ws, L, "WELL", (1, 12))
     if well: header["well_name"] = well
 
-    d = _scan_label_value(ws, L, "DATE", (1, 12))
-    if d:
-        dd = _date_parse(d)
-        if dd: header["date"] = dd
+    # DATE — on some reports this is a combined "DATE : 05/05/2026"
+    # string; on others (like this one) the label cell just says "DATE "
+    # with the actual datetime value sitting in the very next cell.
+    dv, _, _ = _scan_label_cell(ws, L, S, "DATE", (1, 12))
+    dd = _date_parse(dv)
+    if dd: header["date"] = dd
 
-    rep = _scan_label_value(ws, L, "REP N°", (1, 12)) or _scan_label_value(ws, L, "REP N", (1, 12))
-    if rep:
-        n = _int(rep, 0)
+    # REP N° — same split-cell pattern: label alone, value in the next
+    # cell (often a bare int rather than embedded text).
+    repv, _, _ = _scan_label_cell(ws, L, S, "REP N°", (1, 12))
+    if repv is None:
+        repv, _, _ = _scan_label_cell(ws, L, S, "REP N", (1, 12))
+    if repv is not None:
+        n = _int(repv, 0)
         if n > 0: header["day_number"] = n
 
     rig = _scan_label_value(ws, L, "RIG NAME", (1, 12))
@@ -249,21 +315,27 @@ def parse_entp204(source: Union[Path, str, BytesIO]) -> dict:
     field = _scan_label_value(ws, L, "FIELD", (1, 12))
     if field: header["field_name"] = field
 
-    # MD / TVD / formation
-    md = _scan_label_value(ws, L, "TOTAL MD", (1, 12))
-    if md:
-        v = _float(md)
-        if v: header["well_md"] = v
-    tvd = _scan_label_value(ws, L, "TOTAL TVD", (1, 12))
-    if tvd:
-        v = _float(tvd)
-        if v: header["tvd"] = v
+    # MD / TVD — label text varies between reports ("TOTAL MD" vs bare
+    # "MD"); try both, preferring the more specific one first so we don't
+    # accidentally match a "MD" substring inside an unrelated label.
+    for lbl in ("TOTAL MD", "MD"):
+        mdv, _, _ = _scan_label_cell(ws, L, S, lbl, (1, 12))
+        if mdv is not None:
+            v = _float(mdv)
+            if v: header["well_md"] = v
+            break
+    for lbl in ("TOTAL TVD", "TVD"):
+        tvdv, _, _ = _scan_label_cell(ws, L, S, lbl, (1, 12))
+        if tvdv is not None:
+            v = _float(tvdv)
+            if v: header["tvd"] = v
+            break
 
-    # Supervisors — "Supervisor: L.BOUHENACHE +N.Ayad"
+    # Supervisors — names are joined with '+', '&', ',' OR '/' depending
+    # on the report ("L.BOUHENACHE +N.Ayad" vs "N. AUAT / Z.DJALAL").
     sup_raw = _scan_label_value(ws, L, "Supervisor", (1, 12))
     if sup_raw:
-        # Split on '+' or '&' or ',' into up to two names
-        names = re.split(r"\s*[+&,]\s*", sup_raw)
+        names = re.split(r"\s*[+&,/]\s*", sup_raw)
         names = [n.strip() for n in names if n.strip()]
         if names:
             header["supervisor"] = names[0]
@@ -306,6 +378,24 @@ def parse_entp204(source: Union[Path, str, BytesIO]) -> dict:
     reason = _scan_label_value(ws, L, "WORK-OVER REASON", (1, 12))
     if reason:
         header["well_objective"] = reason
+
+    # Bonus fields — cheap to pull via the same split-cell scan, not
+    # previously extracted despite being present on the sheet.
+    spud_v, _, _ = _scan_label_cell(ws, L, S, "SPUD ON WELL", (1, 12))
+    spud_d = _date_parse(spud_v)
+    if spud_d: header["spud_date"] = spud_d
+
+    dnpt_v, _, _ = _scan_label_cell(ws, L, S, "Daily NPT", (1, 12))
+    if dnpt_v is not None:
+        header["daily_npt_hours"] = _hours_from_any(dnpt_v)
+
+    cnpt_v, _, _ = _scan_label_cell(ws, L, S, "Cum NPT", (1, 12))
+    if cnpt_v is not None:
+        header["cum_npt_hours"] = _hours_from_any(cnpt_v)
+
+    safety_v, _, _ = _scan_label_cell(ws, L, S, "Last Safety Meeting", (1, 12))
+    safety_d = _date_parse(safety_v)
+    if safety_d: header["last_safety_meeting"] = safety_d
 
     # =====================================================================
     # OPERATIONS — table header "FROM | TO | HRS | DESCRIPTION | ... BILL | COMPANY"
@@ -409,22 +499,45 @@ def parse_entp204(source: Union[Path, str, BytesIO]) -> dict:
                 ).strip()
 
     # =====================================================================
-    # TARIF TOTALS — row with "T1 =00h00 | T2 =24h00 | ..."
+    # TARIF TOTALS — row with T1/T2/T3/T4/FT/NR labels.  On some reports
+    # these are combined single-cell strings ("T1 =00h00"); on this one
+    # the label and value are ADJACENT cells (label "T1 =" then a
+    # timedelta value in the next cell).  Scan generically for either.
     # =====================================================================
     tarif_totals = {}
     for r in range(100, 115):
-        b = _clean(_cell(ws, r, 2, L) or "")
-        if re.match(r"^T1\s*=", b):
-            # This row holds all the T-codes across columns
-            for c in range(2, 20):
-                cell_text = _clean(_cell(ws, r, c, L) or "")
-                m = re.match(r"^(T[1-4])\s*=\s*(.*)$", cell_text)
-                if m:
-                    code = m.group(1).lower()
-                    hrs = _hhmm_to_hours(m.group(2))
-                    if hrs > 0:
-                        tarif_totals[code] = hrs
-            break
+        row_has_code = any(
+            re.match(r"^(T[1-4]|FT|NR)\s*=", _clean(_cell(ws, r, c, L) or ""))
+            for c in range(2, 16)
+        )
+        if not row_has_code:
+            continue
+        for c in range(2, 16):
+            cell_text = _clean(_cell(ws, r, c, L) or "")
+            m = re.match(r"^(T[1-4]|FT|NR)\s*=\s*(.*)$", cell_text)
+            if not m:
+                continue
+            code = m.group(1).lower()
+            trailing = m.group(2).strip()
+            is_cum = False
+            if trailing:
+                if trailing.upper().startswith("CUM"):
+                    is_cum = True
+                    trailing = re.sub(r"^CUM\s*", "", trailing, flags=re.IGNORECASE)
+                hrs = _hhmm_to_hours(trailing)
+            else:
+                end_c = S.get((r, c), c)
+                val = _cell(ws, r, end_c + 1, L)
+                if isinstance(val, str) and val.strip().upper() == "CUM":
+                    is_cum = True
+                    val = _cell(ws, r, end_c + 2, L)
+                hrs = _hours_from_any(val)
+            if hrs > 0:
+                # A 'CUM' value is cumulative-since-start, not today's
+                # daily total — keep it separate so it isn't mistaken for
+                # today's actual T-code hours.
+                tarif_totals[f"cum_{code}" if is_cum else code] = hrs
+        break
 
     # Back-assign bill codes for any operations that don't already carry
     # one.  Same-day ops frequently leave the BILL column blank mid-day
@@ -462,7 +575,8 @@ def parse_entp204(source: Union[Path, str, BytesIO]) -> dict:
     # TEXT SECTIONS — ACTUEL OPERATIONS / PLAN OPERATIONS / REMARKS
     # =====================================================================
     text_sections = {}
-    actuel = _scan_label_value(ws, L, "ACTUEL OPERATIONS", (100, 120))
+    actuel = (_scan_label_value(ws, L, "ACTUAL OPERATIONS", (100, 120))
+              or _scan_label_value(ws, L, "ACTUEL OPERATIONS", (100, 120)))
     if actuel:
         v = actuel
         if len(v) > 300:
@@ -472,6 +586,9 @@ def parse_entp204(source: Union[Path, str, BytesIO]) -> dict:
     plan = _scan_label_value(ws, L, "PLAN OPERATIONS", (100, 120))
     if plan:
         text_sections["plan_operations"] = plan
+    requirements = _scan_label_value(ws, L, "REQUIREMENTS", (100, 122))
+    if requirements:
+        text_sections["requirements"] = requirements
     remarks = _scan_label_value(ws, L, "REMARKS", (100, 122))
     if remarks:
         text_sections["remarks"] = remarks

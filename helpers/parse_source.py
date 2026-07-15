@@ -50,8 +50,12 @@ def _sniff_kind(source) -> str:
     head = _read_head(source)
     if head.startswith(b"%PDF-"):
         return "pdf"
-    # Legacy Word/Excel format (OLE2 Compound File Binary)
+    # Legacy OLE2 Compound File Binary — shared by .xls (Excel) and legacy
+    # .doc (Word).  Disambiguate by extension; BytesIO (no extension) falls
+    # back to "doc" since in-memory Word is the more common case here.
     if head.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"):
+        if isinstance(source, (str, Path)) and Path(source).suffix.lower() == ".xls":
+            return "xls"
         return "doc"
     # .xlsx and .docx are both zip archives — disambiguate by extension
     if head.startswith(b"PK\x03\x04"):
@@ -74,9 +78,14 @@ def _detect_format_xlsx(source) -> str:
         wb = load_workbook(source, data_only=True, read_only=True)
     ws = wb.active
 
-    # Scan the first 12 rows × 28 cols for marker strings
+    # Scan the first 18 rows × 28 cols for marker strings.  18 (not 12) so
+    # the rig-number cells of the Haoud Berkaoui workover templates
+    # (ENF#10 / TP#215 / ENF#30) — whose "Appareil" / rig cell sits on row
+    # 14 — are captured.  The remaining branches only match specific,
+    # low-collision keywords, so the extra rows don't misroute other
+    # formats.
     markers = []
-    for row in ws.iter_rows(min_row=1, max_row=12, max_col=28, values_only=True):
+    for row in ws.iter_rows(min_row=1, max_row=18, max_col=28, values_only=True):
         for v in row:
             if v is not None:
                 markers.append(str(v).upper())
@@ -94,11 +103,17 @@ def _detect_format_xlsx(source) -> str:
         return "entp204"
 
     # TP-195 — SONATRACH AIN T'SILA format.  Same template family as TP-182
-    # (English, "DAILY DRILLING REPORT" title) but uses split label/value
-    # cells, "OFFICE REP" instead of "SUPERINTANDANT", and only "NEXT BOP
-    # TEST" (no LAST BOP).  Must be checked BEFORE TP-182 since both share
-    # the SONATRACH PRODUCTION DIVISION title.
-    if "OFFICE REP" in blob:
+    # (English, "DAILY DRILLING REPORT" title).  Some TP-195 reports use
+    # "OFFICE REP" instead of "SUPERINTANDANT"; others (verified against a
+    # real report) use "Superintandant" just like TP-182, which makes that
+    # label alone useless for telling them apart.  The reliable signal is
+    # the rig number itself ("ENTP 195" / "ENTP195" / "ENTP-195") or the
+    # AIN T'SILA "AT-NN" well prefix — check these FIRST, before the
+    # generic TP-182 fallback, and keep "OFFICE REP" as a secondary catch
+    # for report variants that do use it instead of Superintandant.
+    if (re.search(r"\bENTP[\s#\-]*195\b", blob)
+            or (re.search(r"\bAT[\s\-]?\d{1,3}\b", blob) and "AIN T" in blob)
+            or "OFFICE REP" in blob):
         return "tp195"
 
     # TP-182 — SONATRACH PRODUCTION DIVISION Daily Drilling Report format
@@ -107,6 +122,30 @@ def _detect_format_xlsx(source) -> str:
         return "tp182"
     if "SONATRACH PRODUCTION DIVISION" in blob and "DAILY DRILLING REPORT" in blob:
         return "tp182"
+
+    # ENF#30 — Haoud Berkaoui workover format (same report family as
+    # ENF#10 / TP#215, title "RAPPORT JOURNALIER DE WORKOVER").  Distinct
+    # rig number "ENF#30" — must be checked BEFORE the generic ENF#04
+    # catch-all below (which also fires on "HAOUD BERKAOUI" / "WORKOVER").
+    if (re.search(r"\bENF\s*#?\s*30\b", blob)
+            or "ENAFOR # 30" in blob or "ENAFOR#30" in blob
+            or "ENF#30" in blob or "ENF #30" in blob or "ENF 30" in blob):
+        return "enf30"
+
+    # ENF#10 — Haoud Berkaoui workover format (rig "ENF#10", same template
+    # as TP#215).  Distinct rig number — must be checked BEFORE the generic
+    # ENF#04 catch-all below (which also fires on "HAOUD BERKAOUI").
+    if (re.search(r"\bENF\s*#?\s*10\b", blob)
+            or re.search(r"\bENAFOR\s*#?\s*10\b", blob)
+            or "ENF#10" in blob or "ENF #10" in blob or "ENF 10" in blob):
+        return "enf10"
+
+    # TP#215 — Haoud Berkaoui workover format (rig "TP#215", same template
+    # as ENF#10).  Distinct rig number — must be checked BEFORE the generic
+    # ENF#04 catch-all below (which also fires on "HAOUD BERKAOUI").
+    if (re.search(r"\bTP\s*#?\s*215\b", blob)
+            or "TP#215" in blob or "TP #215" in blob or "TP 215" in blob):
+        return "tp215"
 
     # ENAFOR ENF#04 — French workover format (Haoud Berkaoui, DDNH wells).
     # Two layouts in circulation: 2026-05-10 title "RAPPORT JOURNALIER DE
@@ -138,6 +177,17 @@ def _detect_format_xlsx(source) -> str:
             and ("TOOL PUSHER" in blob or "LAST BOP TEST" in blob)):
         return "entp127"
 
+    # ENTP-219 — ENTP rig 219, SONATRACH DP Hassi Messaoud daily work-over
+    # report (modern .xlsx, single sheet "DWR N°1").  English-labeled header;
+    # title "DAILY WORK-OVER REPORT" at J3 and a "WORK-OVER OPERATIONS"
+    # table header.  Distinct from the French RAPPORT JOURNALIER workover
+    # templates (TP-173/TP-179/TP-236) and from TP-185 (which is legacy .xls
+    # and shares the SHDP family but uses "RAPPORT JOURNALIER WORK OVER").
+    if ("ENTP 219" in blob or "ENTP-219" in blob or "ENTP219" in blob
+            or "WORK-OVER OPERATIONS" in blob
+            or "DAILY WORK-OVER REPORT" in blob):
+        return "tp219"
+
     # GW29 layout family — French "Rapport journalier de Work - Over" with
     # the AVANCEMENT / OUTILS / USURE / PARAMETRES section headers at row 3
     # and the wide header in rows 1-2 (label/value pairs).  Originally for
@@ -162,6 +212,16 @@ def _detect_format_xlsx(source) -> str:
     if "TP-173" in blob or "DERNIER TUBAGE" in blob:
         return "tp173"
 
+    # TP-236 — ENTP rig 236, SONATRACH "RAPPORT JOURNALIER DU WORK OVER"
+    # French/English workover format.  Shares the same title as TP-179 /
+    # TP-173 but is distinguished by the rig number ("TP 236" / "TP-236" /
+    # "ENTP 236") in the header.  Must be checked BEFORE the generic TP-179
+    # catch-all below (which also matches "RAPPORT JOURNALIER" + "WORK").
+    if ("TP 236" in blob or "TP-236" in blob
+            or "ENTP 236" in blob or "ENTP-236" in blob
+            or re.search(r"\bENTP\s?236\b", blob)):
+        return "tp236"
+
     # TP-179 — French workover format (ENTP rigs)
     if "RAPPORT JOURNALIER" in blob and "WORK" in blob:
         return "tp179"
@@ -175,6 +235,14 @@ def _detect_format_xlsx(source) -> str:
     # ENF branch below.
     if "ENF # 33" in blob or "ENF#33" in blob or re.search(r"\bBKNS[-\s]?\d", blob):
         return "enf33"
+
+    # ENF#24 — newer ENAFOR DDR template (rig ENF#24).  Same ENF DDR family as
+    # ENF#17 / ENF#33 but with a few header cells shifted and a restructured
+    # "Last Csg" block.  Distinguish by the rig number ("ENF#24" / "ENF #24"
+    # / "ENF 24"); must be checked BEFORE the generic ENF catch-all below.
+    if (re.search(r"ENF\s*#\s*24\b", blob)
+            or "ENF#24" in blob or "ENF #24" in blob or "ENF 24" in blob):
+        return "enf24"
 
     # ENAFOR DDR (ENF#NN rigs) — distinguishing markers
     if "DAILY DRILLING REPORT" in blob and ("ENF#" in blob or "ENF #" in blob):
@@ -224,6 +292,48 @@ def _detect_format_pdf(source) -> str:
         return "enf34_pdf"
     if "DIRECTION RÉGIONALE GASSI" in blob or "GASSI-TOUIL" in blob:
         return "enf34_pdf"
+
+    return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Legacy Excel (.xls) format detection
+# ---------------------------------------------------------------------------
+def _detect_format_xls(source) -> str:
+    """Peek at a legacy .xls source (OLE2) and return the rig template key.
+
+    .xls is the only spreadsheet flavour openpyxl can't read, so we open it
+    with xlrd (imported lazily) and scan the first sheet's name plus its
+    first 12 rows × 28 cols for distinguishing marker strings.
+    """
+    import xlrd
+
+    if isinstance(source, (str, Path)):
+        book = xlrd.open_workbook(str(source), formatting_info=False)
+    else:
+        pos = source.tell()
+        raw = source.read()
+        source.seek(pos)
+        book = xlrd.open_workbook(file_contents=raw, formatting_info=False)
+
+    sheet = book.sheet_by_index(0)
+    markers = [sheet.name.upper()]
+    for r in range(min(sheet.nrows, 12)):
+        for c in range(min(sheet.ncols, 28)):
+            v = sheet.cell_value(r, c)
+            if v is not None and v != "":
+                markers.append(str(v).upper())
+    blob = " || ".join(markers)
+    book.release_resources()
+
+    # TP-185 — SONATRACH DP Hassi Messaoud daily workover report (.xls).
+    # Title "RAPPORT JOURNALIER WORK OVER" + rig "TP 185" / "TP-185" /
+    # "OMN"-prefixed well.  Must be checked before any generic "RAPPORT
+    # JOURNALIER" workover catch-all, which would otherwise misroute it.
+    if ("TP 185" in blob or "TP-185" in blob
+            or "RAPPORT JOURNALIER WORK OVER" in blob
+            or re.search(r"\bOMN[-\s]?\d", blob)):
+        return "tp185"
 
     return "unknown"
 
@@ -315,6 +425,8 @@ def _detect_format(source) -> str:
         return _detect_format_xlsx(source)
     if kind in ("doc", "docx"):
         return _detect_format_word(source)
+    if kind == "xls":
+        return _detect_format_xls(source)
     return "unknown"
 
 
@@ -330,7 +442,19 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
     fmt = _detect_format(source)
 
     # Excel-backed extractors
-    if fmt == "enf":
+    if fmt == "enf30":
+        from extractors.enf30_extract import parse_enf30
+        data = parse_enf30(source)
+    elif fmt == "enf10":
+        from extractors.enf10_extract import parse_enf10
+        data = parse_enf10(source)
+    elif fmt == "tp215":
+        from extractors.tp215_extract import parse_tp215
+        data = parse_tp215(source)
+    elif fmt == "enf24":
+        from extractors.enf24_extract import parse_ddr
+        data = parse_ddr(source)
+    elif fmt == "enf":
         from extractors.enf17_extract import parse_ddr
         data = parse_ddr(source)
     elif fmt == "enf33":
@@ -342,6 +466,9 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
     elif fmt == "tp173":
         from extractors.tp173_extract import parse_tp173
         data = parse_tp173(source)
+    elif fmt == "tp236":
+        from extractors.tp236_extract import parse_wo_report
+        data = parse_wo_report(source)
     elif fmt == "tp183":
         from extractors.tp183_extract import parse_tp183
         data = parse_tp183(source)
@@ -357,12 +484,20 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
     elif fmt == "entp127":
         from extractors.entp127_extract import parse_tp127
         data = parse_tp127(source)
+    elif fmt == "tp219":
+        from extractors.tp219_extract import parse_entp219
+        data = parse_entp219(source)
     elif fmt == "gw29":
         from extractors.gw29_extract import parse_gw29
         data = parse_gw29(source)
     elif fmt == "enf04":
         from extractors.enf04_extract import parse_enf04
         data = parse_enf04(source)
+
+    # Legacy .xls extractor (xlrd-backed)
+    elif fmt == "tp185":
+        from extractors.tp185_extract import parse_tp185
+        data = parse_tp185(source)
 
     # PDF-backed extractors
     elif fmt == "enf34_pdf":
@@ -381,8 +516,8 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
         raise ValueError(
             f"Unrecognised report format. Markers in the file did not match "
             f"any known rig layout. Add a new extractor module and register "
-            f"it in parse_source._detect_format_xlsx() or "
-            f"_detect_format_pdf()."
+            f"it in parse_source._detect_format_xlsx(), "
+            f"_detect_format_xls(), or _detect_format_pdf()."
         )
 
     data.setdefault("_meta", {})["source_format"] = fmt

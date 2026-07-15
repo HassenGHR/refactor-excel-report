@@ -7,11 +7,13 @@ Usage:
     python batch_to_router_excel.py REPORT1.xlsx REPORT2.pdf report.docx
     python batch_to_router_excel.py INPUT_DIR -o OUTPUT_DIR
     python batch_to_router_excel.py INPUT_DIR --recursive
-    python batch_to_router_excel.py "*.xlsx" "*.pdf"
+    python batch_to_router_excel.py "*.xlsx" "*.pdf" "*.xls"
 
-Each input file is routed through helpers.parse_source.parse_source which
-auto-detects its rig template. Files whose format isn't recognized are
-skipped with a warning rather than aborting the batch.
+Supports .xlsx/.xlsm/.xls (Excel, including legacy .xls via the TP-185
+extractor), .pdf, and Word .doc/.docx sources. Each input file is routed
+through helpers.parse_source.parse_source which auto-detects its rig
+template. Files whose format isn't recognized are skipped with a warning
+rather than aborting the batch.
 
 For each successful source, a separate ZIP archive is created containing
 its single router-facing .xlsx output.
@@ -27,7 +29,7 @@ from to_router_excel import _ensure_date, parse_ddr, make_router_excel_bytes
 from datetime import datetime, date as date_type
 
 
-SUPPORTED_SUFFIXES = (".xlsx", ".xls", ".pdf", ".doc", ".docx")
+SUPPORTED_SUFFIXES = (".xlsx", ".xlsm", ".xls", ".pdf", ".doc", ".docx")
 
 
 def _iter_sources(inputs: List[Path], recursive: bool, pattern: str) -> List[Path]:

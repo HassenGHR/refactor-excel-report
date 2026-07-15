@@ -10,29 +10,36 @@ FastAPI `/v1/excel_import/upload` endpoint can ingest.
 .
 ├── extractors/                 # Per-rig extraction modules
 │   ├── __init__.py
+│   ├── enf04_extract.py        # ENAFOR rig 04, Haoud Berkaoui (2 layouts)
 │   ├── enf06_extract.py        # ENAFOR rig 06, Daily Workover Report
 │   ├── enf08_extract.py        # ENAFOR rig 08, Daily Workover Report
+│   ├── enf10_extract.py        # ENAFOR rig 10, Haoud Berkaoui workover
 │   ├── enf17_extract.py        # ENAFOR rig 17, English DDR
+│   ├── enf24_extract.py        # ENAFOR rig 24, newer DDR (header shift)
 │   ├── enf27_extract.py        # ENAFOR rig 27, Direction Régionale OHANET
+│   ├── enf30_extract.py        # ENAFOR rig 30, Haoud Berkaoui workover
 │   ├── enf33_extract.py        # ENAFOR rig 33, BERKINE/BKNS DDR (.xlsm)
-│   ├── enf04_extract.py        # ENAFOR rig 04, Haoud Berkaoui (2 layouts)
 │   ├── enf34_pdf_extract.py    # ENAFOR rig 34, Gassi-Touil PDF
 │   ├── entp127_extract.py      # ENTP DF rig 127, DAD wells, English template
+│   ├── entp204_extract.py      # ENTP rig 204, AIN T'SILA / TXNO wells
 │   ├── gw29_extract.py         # GW-29 / TP-127 layout family — French template (GWDC REB + DRAA DAOUI)
+│   ├── rnse08_extract.py       # ENTP rig 188, RNSE wells (Word .doc/.docx)
 │   ├── tp173_extract.py        # ENTP rig 173, ADRAR / ODZ wells
 │   ├── tp179_extract.py        # ENTP rig 179, ADRAR / HTJW wells
 │   ├── tp182_extract.py        # ENTP rig 182, SONATRACH / WIH wells
 │   ├── tp183_extract.py        # ENTP rig 183, TMLS wells
+│   ├── tp185_extract.py        # ENTP rig 185, Hassi Messaoud workover (.xls)
 │   ├── tp186_extract.py        # ENTP rig 186, ZARZAITINE telex (Word .doc/.docx)
-│   ├── rnse08_extract.py       # ENTP rig 188, RNSE wells (Word .doc/.docx)
 │   ├── tp195_extract.py        # ENTP rig 195, AIN T'SILA / AT wells
-│   └── entp204_extract.py      # ENTP rig 204, AIN T'SILA / TXNO wells
+│   ├── tp215_extract.py        # TP#215, Haoud Berkaoui workover
+│   ├── tp219_extract.py        # ENTP rig 219, Hassi Messaoud daily work-over (.xlsx)
+│   └── tp236_extract.py        # ENTP rig 236, ADRAR workover
 ├── helpers/
 │   ├── __init__.py
 │   ├── bill_code_assign.py     # Bill-code partitioning + normalization
 │   └── parse_source.py         # Magic-byte sniffing, format detection, dispatcher
 ├── to_router_excel.py          # Single-file CLI
-├── batch_to_router_excel.py    # Batch processor (planned)
+├── batch_to_router_excel.py    # Batch processor (multiple files / directories)
 ├── requirements.txt
 └── README.md
 ```
@@ -82,7 +89,7 @@ python batch_to_router_excel.py report.xlsx report.pdf report.docx
 python batch_to_router_excel.py reports --recursive
 
 # Write every output ZIP into a dedicated directory
-python batch_to_router_excel.py reports -o outputs
+python to_router_excel.py source.xlsx -o custom_output.xlsx
 ```
 
 Each successful source produces its own ZIP archive containing a single
@@ -101,16 +108,23 @@ warning, while errors are reported per file.
 | enf04_extract        | ENF#04 | .xlsx       | Haoud Berkaoui — Layouts A and B |
 | enf06_extract        | ENF#06 | .xlsx       | Daily Workover Report            |
 | enf08_extract        | ENF#08 | .xlsx       | Daily Workover Report            |
+| enf10_extract        | ENF#10 | .xlsx       | Haoud Berkaoui workover          |
 | enf17_extract        | ENF#17 | .xlsx       | DDR English (OpenWells)          |
+| enf24_extract        | ENF#24 | .xlsx       | Newer ENF DDR (header shift)     |
 | enf27_extract        | ENF#27 | .xlsx       | DIRECTION REGIONALE OHANET       |
+| enf30_extract        | ENF#30 | .xlsx       | Haoud Berkaoui workover          |
 | enf33_extract        | ENF#33 | .xlsx/.xlsm | DDR English, BERKINE/BKNS wells  |
 | tp173_extract        | TP-173 | .xlsx       | ADRAR, ODZ wells                 |
 | tp179_extract        | TP-179 | .xlsx       | ADRAR, HTJW wells                |
 | tp182_extract        | TP-182 | .xlsx       | SONATRACH PRODUCTION / WIH       |
 | tp183_extract        | TP-183 | .xlsx       | TMLS, single-sheet               |
+| tp185_extract        | TP-185 | .xls        | Hassi Messaoud workover (OLE2)   |
 | tp186_extract        | TP-186 | .doc, .docx | ZR wells, ZARZAITINE telex       |
-| rnse08_extract       | TP-188 | .doc, .docx | RNSE wells, ops-table format     |
 | tp195_extract        | TP-195 | .xlsx       | AIN T'SILA, OFFICE REP           |
+| tp215_extract        | TP#215 | .xlsx       | Haoud Berkaoui workover          |
+| tp219_extract        | ENTP-219 | .xlsx     | Hassi Messaoud daily work-over   |
+| tp236_extract        | TP-236 | .xlsx       | ADRAR workover                   |
+| rnse08_extract       | TP-188 | .doc, .docx | RNSE wells, ops-table format     |
 | entp204_extract      | ENTP-204 | .xlsx      | AIN T'SILA, TXNO, LABEL:value    |
 | entp127_extract      | ENTP TP-127 | .xlsx   | DAD wells, DRAA DAOUI, English   |
 | gw29_extract         | GW29 / TP-127 | .xlsx  | GWDC REB · TP-127 DRAA DAOUI (French) |
@@ -161,8 +175,9 @@ brew install --cask libreoffice           # macOS
    strings in the top 12 rows.
 2. Copy the closest existing extractor in `extractors/` to
    `extractors/<rig>_extract.py` and adjust cell positions.
-3. Add **one** branch to `helpers.parse_source._detect_format_xlsx` (or
-   `_detect_format_pdf`) returning the rig key. Mind the ordering — more
+3. Add **one** branch to `helpers.parse_source._detect_format_xlsx`,
+   `_detect_format_xls` (legacy `.xls` / OLE2, read with `xlrd`), or
+   `_detect_format_pdf` returning the rig key. Mind the ordering — more
    specific markers must come before more general ones (e.g. TP-195's
    `OFFICE REP` must check before TP-182's `SONATRACH PRODUCTION
    DIVISION`).
