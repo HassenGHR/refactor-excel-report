@@ -204,6 +204,16 @@ def _detect_format_xlsx(source) -> str:
     if re.search(r"\bENTP\s*(?:N°|N|#)?\s*27\b", blob) or "ENTP N\u00B027" in blob:
         return "entp27"
 
+    # TP-187 — ENTP rig 187 / TG-61 / IN AMENAS native .xlsx workover
+    # report.  Distinct markers are the French title "RAPPORT JOURNALIER
+    # WORK OVER" plus the rig/well identifiers "TP 187" / "TG-61" and the
+    # regional banner "IN AMENAS".
+    if (("RAPPORT JOURNALIER" in blob and "WORK OVER" in blob)
+            and (re.search(r"\bTP\s*[- ]?\s*187\b", blob)
+                 or "TG-61" in blob
+                 or "IN AMENAS" in blob)):
+        return "tp187"
+
     # TP-189 — ENTP "RAP ENTP" wide single-sheet daily drilling report
     # (modern .xlsx, ~65 rows x 24 cols).  Filename pattern
     # RAP_ENTP_N_<report#>_<rig>_MD_<well>_DU_*.  Distinctive markers:
@@ -569,6 +579,9 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
     elif fmt == "tp189":
         from extractors.tp189_extract import parse_rap_entp
         data = parse_rap_entp(source)
+    elif fmt == "tp187":
+        from extractors.tp187_extract import parse_tp187
+        data = parse_tp187(source)
     elif fmt == "gw29":
         from extractors.gw29_extract import parse_gw29
         data = parse_gw29(source)
