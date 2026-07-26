@@ -126,6 +126,25 @@ def _strip_label(text: str, *labels: str) -> str:
     return s
 
 
+# Some report instances label the casing/liner shoe fields differently
+# — e.g. 'LAST CSG SHOE: 1649m' in some, '7" LINER SHOE:  1649m' /
+# '7" TOP LINER: 1442m' in others (the pipe SIZE embedded in the LABEL
+# itself rather than a separate cell). This pulls a (size, depth) pair
+# out of either style: size = the leading digit/inch token in the part
+# before the colon (empty if the label has no size, e.g. "LAST CSG SHOE"),
+# depth = the first number in the part after the colon.
+def _parse_labeled_shoe(raw: str):
+    s = _clean(raw)
+    if ":" not in s:
+        return "", None
+    label_part, value_part = s.split(":", 1)
+    m = re.match(r'^\D*([\d][\d"\'/½¼¾.]*)', label_part)
+    size = m.group(1).strip() if m else ""
+    dm = re.search(r"([\d,\.]+)", value_part)
+    depth = _float(dm.group(1)) if dm else None
+    return size, depth
+
+
 # ---------------------------------------------------------------------------
 # Main extractor
 # ---------------------------------------------------------------------------
@@ -167,10 +186,37 @@ def parse_tp182(source: Union[Path, str, BytesIO]) -> dict:
     # insert function fills from header.last_csg_shoe_real OR header.top_shoe.
     # TP-182 has only ONE casing shoe entry (no separate liner), so we put it
     # in `top_shoe` so the frontend "Last CSG SHOE" field fills.
-    header["top_shoe"]            = _strip_label(_cell(ws, 7, 5,  L), "LAST CSG SHOE")
-    header["top_window"]          = _strip_label(_cell(ws, 7, 8,  L), '9"5/8 TOP WONDOW',
-                                                                       "TOP WONDOW",
-                                                                       "TOP WINDOW")
+    # Label wording varies by report instance: some say "LAST CSG SHOE: X",
+    # others say "7'' LINER SHOE:  1649m" (size embedded in the label). Handle
+    # both, and populate the standardized last_lnr_shoe field either way.
+    raw_shoe = _clean(_cell(ws, 7, 5, L) or "")
+    if raw_shoe:
+        if re.match(r"^\s*LAST CSG SHOE", raw_shoe, re.IGNORECASE):
+            val = _strip_label(raw_shoe, "LAST CSG SHOE")
+            header["top_shoe"] = val
+            header["last_csg_shoe"] = val
+        else:
+            header["top_shoe"] = raw_shoe
+            size, depth = _parse_labeled_shoe(raw_shoe)
+            if size:
+                header["last_lnr_shoe_size"] = size
+                if depth is not None:
+                    header["last_lnr_shoe_depth"] = depth
+                    header["last_lnr_shoe"] = f"{size} @ {depth:g}m"
+    raw_window = _clean(_cell(ws, 7, 8, L) or "")
+    if raw_window:
+        if re.search(r"TOP\s*W[OI]ND[O]?W", raw_window, re.IGNORECASE):
+            header["top_window"] = _strip_label(raw_window, '9"5/8 TOP WONDOW',
+                                                             "TOP WONDOW",
+                                                             "TOP WINDOW")
+        else:
+            header["top_window"] = raw_window
+            size, depth = _parse_labeled_shoe(raw_window)
+            if size:
+                header["last_lnr_top_size"] = size
+                if depth is not None:
+                    header["last_lnr_top_depth"] = depth
+                    header["last_lnr_top"] = f"{size} @ {depth:g}m"
     header["bop_test"]            = _date_parse(_strip_label(_cell(ws, 7, 10, L), "LAST BOP TEST"))
     header["last_safety_meeting"] = _date_parse(_strip_label(_cell(ws, 7, 12, L), "LAST SAFETY MEETING"))
     header["cum_npt"]             = _float(_strip_label(_cell(ws, 7, 15, L), "Cum NPT"))
@@ -366,12 +412,20 @@ def parse_tp182(source: Union[Path, str, BytesIO]) -> dict:
             })
 
     # =====================================================================
-    # OPERATIONS  (rows 73+)
-    # Header at r72: FROM(B) | TO(C) | HRS(D) | DESCRIPTION(E-N) | BILL(O) | COMPANY(P)
-    # We treat a row as a real operation only if it has BILL or HRS set.
+    # OPERATIONS  (rows 72+)
+    # Header at r71: FROM(B) | TO(C) | HRS(D) | DESCRIPTION(E-N) | BILL(O) | COMPANY(P)
+    # A row counts as a real operation only if it has a BILL code (T1/T2/T3/
+    # FT/NR). Some reports include an "AFTER MIDNIGHT" breakdown of
+    # sub-periods within the same block (e.g. 00:00-05:00, 05:00-06:00)
+    # that narrate what happened in more detail — these do NOT carry their
+    # own bill code, are not separate billable operations, and their hours
+    # don't add on top of the parent block's (they'd push the day well past
+    # 24h if counted separately). That narrative is already captured in
+    # text_sections['current_operation'], so bill-less rows are skipped here
+    # rather than double-counted as activities.
     # =====================================================================
     activities = []
-    for row in range(73, 90):
+    for row in range(72, 96):
         start = _cell(ws, row, 2, L)
         end   = _cell(ws, row, 3, L)
         hrs   = _cell(ws, row, 4, L)
@@ -382,17 +436,17 @@ def parse_tp182(source: Union[Path, str, BytesIO]) -> dict:
         # Skip empty rows
         if not bill and not desc:
             continue
-        # Real operation rows have a BILL code (T1/T2/T3/FT/NR).  Rows that
-        # have a time range but no BILL are display-only / overflow text and
-        # are already counted within an earlier row's 24h block.
-        if not bill:
-            continue
         # Skip the summary line (contains "T1=" or "T2=" markers)
         if any(t in desc.upper() for t in ("T1=", "T2=", "T3=", "FT=", "NR=")):
+            continue
+        # Only rows with an explicit bill code are real, billable operations
+        if not bill:
             continue
 
         start_t = _time_parse(start)
         end_t   = _time_parse(end)
+        has_time_range = start_t is not None and end_t is not None
+
         hours = 0.0
         if isinstance(hrs, (int, float)):
             hours = float(hrs)
@@ -403,7 +457,7 @@ def parse_tp182(source: Union[Path, str, BytesIO]) -> dict:
                 # Excel epoch zero (1900-01-01 00:00) means a 24-hour duration
                 if hours == 0.0 and start_t and end_t and start_t == end_t == time(0, 0):
                     hours = 24.0
-        elif start_t and end_t:
+        elif has_time_range:
             sm = start_t.hour * 60 + start_t.minute
             em = end_t.hour * 60 + end_t.minute
             if em == sm: hours = 24.0
@@ -439,7 +493,7 @@ def parse_tp182(source: Union[Path, str, BytesIO]) -> dict:
             text_sections["current_operation"] = value
             text_sections["day_summary"]       = value
         elif upper.startswith("PLAN OPERATION"):
-            text_sections["plan_operations"] = re.sub(r"^PLAN\s+OPERATION\s*:?\s*", "", text, flags=re.IGNORECASE)
+            text_sections["plan_operations"] = re.sub(r"^PLAN\s+OPERATIONS?\s*:?\s*", "", text, flags=re.IGNORECASE)
         elif "REQUIREMENT" in upper or "RENTAL EQUIPMENT" in upper:
             v2 = re.sub(r"^REQUIREMENTS\s*/\s*RENTAL EQUIPMENT\s*:?\s*", "", text, flags=re.IGNORECASE)
             if v2: text_sections["requirements"] = v2

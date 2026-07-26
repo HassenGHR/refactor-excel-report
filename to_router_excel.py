@@ -372,7 +372,12 @@ def _create_router_workbook(data: dict) -> Workbook:
     ]:
         if key in safety:
             ws.cell(safe_row, 1).value = label
-            ws.cell(safe_row, 2).value = safety[key]
+            val = safety[key]
+            # Some extractors return a dict for stop_cards: {"daily": X, "total": Y}.
+            # Format that into a simple string so openpyxl can write it.
+            if key == "stop_cards" and isinstance(val, dict):
+                val = f"daily: {val.get('daily', '')}, total: {val.get('total', '')}"
+            ws.cell(safe_row, 2).value = val
             safe_row += 1
 
     # =========================================================================

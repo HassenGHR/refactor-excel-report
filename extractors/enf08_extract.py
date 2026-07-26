@@ -1,60 +1,75 @@
 #!/usr/bin/env python3
 """
-enf08_extract.py — extract an ENF#18 (ENAFOR rig 18, HMD field, MD wells)
-Daily Workover Report (.xlsx) into the standard dict shape.
+enf08_extract.py — extract an ENF-08 (ENAFOR rig 08, ISNO wells, TINRHERT
+field) Daily Workover Report from a Word file (.doc or .docx) into the
+standard dict shape.
 
 Source layout
 -------------
-Single-sheet French/English template (~60 rows × 35 cols).
+Microsoft Word document (legacy .doc or modern .docx).  Same overall
+title as the TP-186 report family — "RAPPORT JOURNALIER WORK-OVER" —
+but for rig ENF#08 / well ISNO#xx / field TINRHERT, with a few real
+differences from the TP-186 layout (see notes below).
 
-  Row 3   : Title "Rapport journalier work-over" (H3)
-  Row 4   : Date (V4), Day number (Y4), Division Production (C4)
-  Row 6   : Puits (B6), Champ (E6), Appareil (I6=ENF#18),
-            Dernier Tubage (K6), Top liner (Q6), bouue (W6)
-  Row 7   : FOND (Q7), mud Type (X7, e.g. OBM)
-  Row 8   : Section headers: AVANCEMENTS | OUTILS | USURES | PARAMETRES
-  Row 9-10: Sub-headers for the above blocks
-  Row 11  : Advancement / tool / wear / parameter data
-  Row 15  : TOTAL JOUR (A15) + MATERIELS DE FOND (G15) +
-            MESURES DE DEVIATION (O15) + mud panel header col labels (W15:Y15)
-  Rows 16-19: Mud checks (W=label X=value Y=label Z=value), survey, BHA
-            + deviation measurements
-  Row 20-21: Mud continuation + tarif T1/T2/T3/T4 labels
-  Row 22  : Operations header: Horaire + Analyse des temps et des opérations,
-            Code/Heure/Jour, total-jours (Q22), PRODUITS (W22)
-  Row 23  : DE/A sub-headers + COUTS/Utilisé/Stock
-  Rows 24+: Operations: A=start B=end C=description M=code N=hours
-            Chemicals in cols W-Y starting same rows
-  Row 21  : Tarif column headers + H/E ratio label
-  Row 29  : ∑ total row (N29 = sum of hours), more chemicals
-  Row 30-31: Après minuit label + description
-  Row 35  : Note block
-  Row 38  : Situation à 06:00 (A38, D38)
-  Row 39  : Programme prévue (A39, D39)
-  Rows 38-39: Personnel/supervisor (W38 label, W39 name)
+The document uses 4 tables:
+    Table 0 — header (well, field, rig, tubing/tool designation, mud
+              params, composition, technical params)
+    Table 1 — operations + chemicals + daily cost + situation + plan
+              Operations live in a SINGLE table row, split across two
+              PARALLEL cells: cell 0 holds newline-separated time bands
+              ("HHhMM-HHhMM"), cell 1 holds the newline-separated
+              descriptions aligned by line index (same convention as
+              TP-186's parallel-cell layout, just one row down instead
+              of two).
+    Table 2 — tarif breakdown: T.1/T.2/T.3/T.4/N-R hours and amounts (DA)
+    Table 3 — service companies and their costs
 
-Distinguishing markers (helpers.parse_source._detect_format_xlsx):
-    - "ENF#18" or "ENF # 18" rig name
-    - well "MD " prefix + HMD field + "Rapport journalier work-over"
+Differences from the TP-186 extractor that this file specifically
+accounts for:
+    - The "HORAIRE" header cell is misspelled "HORRAIRE" in this report
+      family, so both spellings are matched.
+    - Table 1 carries an explicit "Coût journalier" (daily cost) cell —
+      used in preference to hunting for the table 2 TOTAL row, though
+      the TOTAL row is kept as a fallback.
+    - The mud "Filtrat" line in this report is a Huile/Eau (oil/water)
+      split ratio (e.g. "90/10"), not a single numeric filtrate value,
+      so it is captured separately rather than forced into a float.
+    - Table 0 carries a tubing/completion "OUTIL" designation
+      (Désignation / Diamètre / Marque-type) and a "COMPOSITION
+      GARNITURE" (DP/DC) block instead of TP-186's BHA/bit fields;
+      these are captured as their own header fields.
+    - Rig names use the "ENF" prefix ("ENF # 08" / "ENF#08") rather
+      than "TP".
+
+.doc files are auto-converted to .docx using LibreOffice headless (must
+be installed on the deployment host).  .docx files are read directly.
+
+Distinguishing markers (used by helpers.parse_source._detect_format):
+    - file extension .doc or .docx
+    - contains "RAPPORT JOURNALIER WORK-OVER" together with
+      "ENF # 08" / "ENF#08" / "ENF-08" (or field "TINRHERT" / well
+      "ISNO")
 """
 from __future__ import annotations
 import re
+import subprocess
+import tempfile
 from datetime import datetime, time, date as date_type, timedelta
 from io import BytesIO
 from pathlib import Path
-from typing import Union
+from typing import Union, List, Tuple, Optional
 
-from openpyxl import load_workbook
+from docx import Document
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers (shared conventions with tp186_extract.py)
 # ---------------------------------------------------------------------------
 def _clean(v) -> str:
     if v is None: return ""
     s = str(v)
-    if s.strip() in ("#VALUE!", "#REF!", "#NAME?", "#N/A", "#DIV/0!", "#NULL!"):
-        return ""
+    # Strip Word's narrow no-break space (\u202f) and regular no-break (\u00a0)
+    s = s.replace("\u202f", " ").replace("\u00a0", " ")
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -63,459 +78,603 @@ def _float(v, default=0.0) -> float:
     if isinstance(v, (int, float)): return float(v)
     s = _clean(v).replace(",", ".").replace(" ", "")
     if s in ("", "-", "/", "None"): return default
-    s = re.sub(r"[a-zA-Zé°%/³]+$", "", s).strip()
-    try: return float(s)
-    except ValueError: return default
+    # Strip trailing unit (handles 'm3', 'm³', '%', 'kg', 'psi', etc.):
+    # take everything up to the last digit + optional decimal portion.
+    m = re.match(r"^([-+]?\d+(?:\.\d+)?)", s)
+    if m:
+        try: return float(m.group(1))
+        except ValueError: pass
+    return default
 
 
 def _int(v, default=0) -> int:
     return int(_float(v, float(default)))
 
 
-def _date_parse(v):
-    if v is None: return None
-    if isinstance(v, datetime): return v.date()
-    if isinstance(v, date_type): return v
-    s = _clean(v)
-    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d-%m-%y"):
-        try: return datetime.strptime(s, fmt).date()
-        except ValueError: continue
-    return None
+def _money_to_int(s) -> int:
+    """'2 350 649,53 DA' or '2\\u202f350\\u202f649' → 2350649."""
+    if s is None: return 0
+    if isinstance(s, (int, float)): return int(s)
+    cleaned = _clean(s)
+    # Drop currency suffix
+    cleaned = re.sub(r"\s*DA\s*$", "", cleaned, flags=re.IGNORECASE)
+    # Drop decimals (we want integer DA)
+    cleaned = re.split(r"[.,]\d{2,3}\s*$", cleaned)[0]
+    # Strip non-digits
+    digits = re.sub(r"\D", "", cleaned)
+    return int(digits) if digits else 0
 
 
-def _time_parse(v):
-    if v is None: return None
-    if isinstance(v, time): return v
-    if isinstance(v, datetime):
-        if v.year == 1900 and v.month == 1 and v.day == 1:
-            return v.time()
-        return v.time()
-    if isinstance(v, timedelta):
-        total = int(v.total_seconds())
-        if total == 86400: return time(0, 0)
-        return time((total // 3600) % 24, (total % 3600) // 60)
-    s = _clean(v)
-    if not s or s in ("-", "None"): return None
-    if s in ("24:00", "24:00:00", "24h00", "24H00", "24h"): return time(0, 0)
-    m = re.match(r"^(\d{1,2})[hH](\d{0,2})$", s)
-    if m: return time(int(m.group(1)) % 24, int(m.group(2) or 0))
-    for fmt in ("%H:%M:%S", "%H:%M", "%Hh%M"):
-        try: return datetime.strptime(s, fmt).time()
-        except ValueError: continue
-    return None
+def _parse_hhmm_duration(s: str) -> float:
+    """'22H30' / '22h30' / '00H00' → decimal hours."""
+    s = _clean(s)
+    m = re.match(r"^(\d{1,2})[hH:](\d{2})$", s)
+    if not m: return 0.0
+    return int(m.group(1)) + int(m.group(2)) / 60.0
 
 
-def _duration_hours(v) -> float:
-    if v is None: return 0.0
-    if isinstance(v, (int, float)): return float(v)
-    if isinstance(v, timedelta): return v.total_seconds() / 3600.0
-    if isinstance(v, time): return v.hour + v.minute / 60.0
-    if isinstance(v, datetime):
-        if v.year == 1900 and v.month == 1 and v.day == 1:
-            return v.hour + v.minute / 60.0
-        return 0.0
-    t = _time_parse(v)
-    if t: return t.hour + t.minute / 60.0
-    return _float(v)
+def _hours_between(start_t: time, end_t: time) -> float:
+    sm = start_t.hour * 60 + start_t.minute
+    em = end_t.hour * 60 + end_t.minute
+    if em == sm:    return 24.0
+    if em > sm:     return (em - sm) / 60.0
+    return (em + 1440 - sm) / 60.0
 
 
-def _build_merged_lookup(ws):
-    lookup = {}
-    for mr in ws.merged_cells.ranges:
-        av = ws.cell(mr.min_row, mr.min_col).value
-        for r in range(mr.min_row, mr.max_row + 1):
-            for c in range(mr.min_col, mr.max_col + 1):
-                if (r, c) != (mr.min_row, mr.min_col):
-                    lookup[(r, c)] = av
-    return lookup
+def _find_libreoffice() -> str:
+    """Locate the LibreOffice executable across platforms.
+
+    Search order:
+      1. LIBREOFFICE_PATH environment variable (lets the user override)
+      2. `soffice` / `libreoffice` on PATH (Linux / macOS / Windows-with-PATH)
+      3. Common Windows install locations (Program Files / Program Files (x86))
+      4. macOS .app bundle
+    Returns the executable path as a string, or raises RuntimeError with
+    a platform-specific install hint.
+    """
+    import os, shutil, sys
+
+    # 1. Explicit override
+    env = os.environ.get("LIBREOFFICE_PATH")
+    if env and Path(env).exists():
+        return env
+
+    # 2. On PATH — both common command names
+    for cmd in ("soffice", "libreoffice"):
+        found = shutil.which(cmd)
+        if found:
+            return found
+
+    # 3. Windows default install locations
+    if sys.platform.startswith("win"):
+        candidates = [
+            Path(r"C:\Program Files\LibreOffice\program\soffice.exe"),
+            Path(r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"),
+            Path(r"C:\Program Files\LibreOffice 7\program\soffice.exe"),
+            Path(r"C:\Program Files\LibreOffice 25\program\soffice.exe"),
+        ]
+        for p in candidates:
+            if p.exists():
+                return str(p)
+
+    # 4. macOS bundle
+    if sys.platform == "darwin":
+        for p in (
+            Path("/Applications/LibreOffice.app/Contents/MacOS/soffice"),
+            Path.home() / "Applications/LibreOffice.app/Contents/MacOS/soffice",
+        ):
+            if p.exists():
+                return str(p)
+
+    # Not found — raise with platform-appropriate hint
+    if sys.platform.startswith("win"):
+        hint = (
+            "LibreOffice not found. Install it from https://www.libreoffice.org/\n"
+            "and either:\n"
+            "  (a) add C:\\Program Files\\LibreOffice\\program to your PATH, or\n"
+            "  (b) set the LIBREOFFICE_PATH environment variable to the full\n"
+            "      path of soffice.exe, e.g.\n"
+            "      setx LIBREOFFICE_PATH \"C:\\Program Files\\LibreOffice\\program\\soffice.exe\""
+        )
+    elif sys.platform == "darwin":
+        hint = ("LibreOffice not found. Install via "
+                "`brew install --cask libreoffice` or download from "
+                "https://www.libreoffice.org/")
+    else:
+        hint = ("LibreOffice not found on PATH. Install with "
+                "`apt-get install libreoffice` (Debian/Ubuntu) or set "
+                "LIBREOFFICE_PATH to the soffice executable.")
+    raise RuntimeError(hint)
 
 
-def _cell(ws, r, c, lookup):
-    v = ws.cell(r, c).value
-    return v if v is not None else lookup.get((r, c))
+def _ensure_docx(source_path: Path) -> Path:
+    """If source is .doc (legacy binary), convert to .docx using LibreOffice
+    headless.  Returns the path to the .docx file (may be the same path if
+    the source was already .docx)."""
+    suffix = source_path.suffix.lower()
+    if suffix == ".docx":
+        return source_path
+    if suffix != ".doc":
+        raise ValueError(f"Unsupported Word file extension: {suffix}")
+
+    soffice = _find_libreoffice()
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="docconv_"))
+    try:
+        result = subprocess.run(
+            [soffice, "--headless", "--convert-to", "docx",
+             "--outdir", str(tmp_dir), str(source_path)],
+            capture_output=True, text=True, timeout=120,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"LibreOffice was located at {soffice!r} but couldn't be executed. "
+            "Check that the file exists and is runnable, or set "
+            "LIBREOFFICE_PATH to a working soffice executable."
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("LibreOffice conversion timed out (>120s)")
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"LibreOffice conversion failed: {result.stderr[:500]}"
+        )
+    docx_path = tmp_dir / (source_path.stem + ".docx")
+    if not docx_path.exists():
+        raise RuntimeError(
+            f"Expected output not found after conversion: {docx_path}"
+        )
+    return docx_path
+
+
+def _date_from_text(s: str) -> Optional[date_type]:
+    """Extract first DD/MM/YYYY or DD-MM-YYYY from a string."""
+    m = re.search(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", s)
+    if not m: return None
+    try:
+        return date_type(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+    except ValueError:
+        return None
 
 
 def _normalize_rig(name: str) -> str:
-    """'ENF#18' or 'ENF # 18' -> 'ENF#18'."""
+    """'ENF # 08' / 'ENF#08' / 'ENF-08' → 'ENF-08'."""
     s = _clean(name).upper()
-    m = re.search(r"ENF\s*#?\s*(\d+)", s)
-    if m: return f"ENF#{int(m.group(1)):02d}"
+    m = re.search(r"ENF[\s#\-]*(\d+)", s)
+    if m: return f"ENF-{m.group(1)}"
     return _clean(name)
 
 
-def _first_numeric(ws, L, row, col_start, col_end):
-    """Scan cols left-to-right and return the first parsable numeric value."""
-    for c in range(col_start, col_end + 1):
-        v = _cell(ws, row, c, L)
-        if v is None: continue
-        try:
-            return _float(v)
-        except Exception:
-            continue
-    return None
+# ---------------------------------------------------------------------------
+# Operations parser
+# ---------------------------------------------------------------------------
+def _parse_parallel_ops(time_lines: List[str], desc_lines: List[str]) -> List[dict]:
+    """
+    Time bands and descriptions live in separate parallel cells, with
+    lines aligned by index:
+
+        cell 0 ('HORRAIRE'):              cell 1 (descriptions):
+        L0: 00h00-12h00                   L0: DTM: suite réception appareil …
+        L1: 12h00-16h00                   L1: Traitement de boue à l'huile …
+        L2: 16h00-17h00                   L2: Montage ligne de pompage …
+
+    Rule: a line at index i in cell 0 with a parseable HHhMM-HHhMM band
+    starts a new op; the same index in cell 1 is its description.  A
+    blank / unparseable time-band line at index i means cell 1's line
+    at index i is a continuation of the previous op's description.
+    """
+    activities = []
+    current = None
+    n = max(len(time_lines), len(desc_lines))
+    time_lines = list(time_lines) + [""] * (n - len(time_lines))
+    desc_lines = list(desc_lines) + [""] * (n - len(desc_lines))
+
+    for i in range(n):
+        tl = time_lines[i].strip()
+        dl = desc_lines[i].rstrip()
+        m = re.match(r"^(\d{1,2})[hH:](\d{2})\s*[-–]\s*(\d{1,2})[hH:](\d{2})\s*$", tl)
+        if m:
+            if current is not None:
+                activities.append(_finalize_op(current))
+            start_t = time(int(m.group(1)) % 24, int(m.group(2)))
+            end_t   = time(int(m.group(3)) % 24, int(m.group(4)))
+            current = {
+                "start_time": start_t,
+                "end_time":   end_t,
+                "desc_parts": [dl.strip()] if dl.strip() else [],
+            }
+        else:
+            if current is not None and dl.strip():
+                current["desc_parts"].append(dl.strip())
+    if current is not None:
+        activities.append(_finalize_op(current))
+    return activities
+
+
+def _finalize_op(d: dict) -> dict:
+    start_t = d["start_time"]
+    end_t   = d["end_time"]
+    hours   = _hours_between(start_t, end_t)
+    return {
+        "start_time": start_t,
+        "end_time":   end_t,
+        "hours":      hours,
+        "phase_name": "",
+        "code": "", "sub": "",
+        "description": _clean(" ".join(d["desc_parts"])),
+        "start_md": 0, "end_md": 0,
+        "npt": 0, "npt_detail": "",
+        "npt_company": "", "op_company": "",
+        "bill": "",        # back-filled from tarif totals
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cell-by-cell table extraction with merged-cell handling
+# ---------------------------------------------------------------------------
+def _row_cells(row) -> List[str]:
+    """Return one entry per VISUAL cell.  Word's `cells` collection
+    repeats the same cell object for spans across columns, so adjacent
+    cells with identical text are deduplicated — but only when their
+    underlying tc element is the same (true merged cell), not when two
+    different cells just happen to hold the same string."""
+    out = []
+    prev_tc = None
+    for c in row.cells:
+        tc = c._tc        # underlying XML element
+        if tc is prev_tc:
+            continue      # same merged cell — skip
+        out.append(c.text.strip())
+        prev_tc = tc
+    return out
+
+
+def _find_value_after(text_row: List[str], label_substr: str) -> str:
+    """In a list of row cells, find the cell whose normalized text EQUALS
+    label_substr (case-insensitive, whitespace-normalized) and return the
+    next cell's value.  Falls back to "starts with" matching."""
+    norm = lambda s: re.sub(r"\s+", " ", s.strip().lower())
+    target = norm(label_substr)
+    for i, cell in enumerate(text_row):
+        if norm(cell) == target and i + 1 < len(text_row):
+            return text_row[i + 1].strip()
+    for i, cell in enumerate(text_row):
+        if norm(cell).startswith(target) and i + 1 < len(text_row):
+            return text_row[i + 1].strip()
+    return ""
+
+
+def _is_horaire_header(cells: List[str]) -> bool:
+    """The time-band header cell is spelled 'HORAIRE' in most reports of
+    this family but 'HORRAIRE' (double-R typo) in others — match both."""
+    for c in cells:
+        u = c.upper()
+        if "HORAIRE" in u or "HORRAIRE" in u:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
 # Main extractor
 # ---------------------------------------------------------------------------
 def parse_enf08(source: Union[Path, str, BytesIO]) -> dict:
-    if isinstance(source, (str, Path)):
-        wb = load_workbook(source, data_only=True)
+    """Parse an ENF-08 (Word .doc / .docx) workover report."""
+    if isinstance(source, BytesIO):
+        try:
+            doc = Document(source)
+            tmp_path = None
+        except Exception:
+            with tempfile.NamedTemporaryFile(suffix=".doc", delete=False) as tf:
+                tf.write(source.getvalue())
+                tmp_path = Path(tf.name)
+            docx_path = _ensure_docx(tmp_path)
+            doc = Document(str(docx_path))
     else:
-        wb = load_workbook(source, data_only=True)
-    ws = wb.active
-    L = _build_merged_lookup(ws)
+        source_path = Path(source)
+        docx_path = _ensure_docx(source_path)
+        doc = Document(str(docx_path))
+
+    # Extract paragraphs and tables
+    paragraphs = [_clean(p.text) for p in doc.paragraphs]
+    tables = doc.tables
 
     # =====================================================================
-    # HEADER
+    # HEADER (table 0 + paragraphs)
     # =====================================================================
     header = {}
 
-    # Row 4: Date at V4, day number at Y4
-    header["date"]       = _date_parse(_cell(ws, 4, 22, L))   # V4
-    header["day_number"] = _int(_cell(ws, 4, 25, L))           # Y4
-
-    # Row 6: well / field / rig / casing / liner / mud
-    header["well_name"]    = _clean(_cell(ws, 6, 2,  L))       # B6  Puits
-    header["field_name"]   = _clean(_cell(ws, 6, 5,  L))       # E6  Champ (HMD)
-    header["rig_name"]     = _normalize_rig(_cell(ws, 6, 9,  L) or "")  # I6  Appareil
-
-    # Dernier Tubage: K6="Dernier Tubage" label, M6:N6="Sabot 7"" (casing description)
-    csg_desc = _clean(_cell(ws, 6, 13, L) or "")               # K6 label
-    csg_shoe = _clean(_cell(ws, 6, 14, L) or "")               # L6:M6 "Sabot 7""
-    if csg_shoe:
-        header["top_shoe"] = csg_shoe
-    elif csg_desc and "TUBAGE" not in csg_desc.upper():
-        header["top_shoe"] = csg_desc
-
-    # Top liner
-    liner = _clean(_cell(ws, 6, 17, L) or "")                   # Q6 (merged Q6:S6)
-    if liner:
-        size = re.sub(r"^\s*Top\s+liner\s*", "", liner, flags=re.IGNORECASE).strip()
-        if size:
-            header["last_csg_top"] = size
-
-    # Total Depth (FOND) - label at Q7, may or may not have an adjacent value cell
-    for c in range(18, 23):
-        v = _cell(ws, 7, c, L)
-        if v is not None:
-            try:
-                header["well_md"] = _float(v)
+    # Date + report number — from paragraph "RAPPORT N° 01 du 19/07/2026"
+    for p in paragraphs:
+        m = re.search(r"du\s+(\d{1,2}[/-]\d{1,2}[/-]\d{4})", p, re.IGNORECASE)
+        if m:
+            d = _date_from_text(m.group(1))
+            if d:
+                header["date"] = d
                 break
-            except (ValueError, TypeError):
-                pass
+    for p in paragraphs:
+        m = re.search(r"RAPPORT\s*N\s*[°o]\s*(\d+)", p, re.IGNORECASE)
+        if m:
+            header["day_number"] = int(m.group(1))
+            break
 
-    # Mud type
-    mud_type = _clean(_cell(ws, 7, 24, L) or "")                # X7 (merged X7:Z7)
-    if mud_type:
-        header["mud_type"] = mud_type
+    # Fallback: "I/ APPAREIL N° : ENF#08   PUITS : ISNO#02   RAPPORT: N° 01 du 19/07/2026"
+    for p in paragraphs:
+        if "APPAREIL" in p.upper() and "PUITS" in p.upper():
+            m = re.search(r"APPAREIL\s*N\s*[°o]?\s*:?\s*([A-Z0-9#\-\s]+?)\s{2,}", p, re.IGNORECASE)
+            if m and "rig_name" not in header:
+                header["rig_name"] = _normalize_rig(m.group(1))
+            m = re.search(r"PUITS\s*:?\s*([A-Z0-9#\-]+)", p, re.IGNORECASE)
+            if m and "well_name" not in header:
+                header["well_name"] = m.group(1).replace(" ", "")
+            if "date" not in header:
+                m = re.search(r"du\s+(\d{1,2}[/-]\d{1,2}[/-]\d{4})", p, re.IGNORECASE)
+                if m:
+                    d = _date_from_text(m.group(1))
+                    if d: header["date"] = d
+            break
 
-    # =====================================================================
-    # AVANCEMENT data (row 11)
-    # =====================================================================
-    # A11=type, B11=op number, C11=depth, D11=advance, E11=duration, F11=cumulative
+    # Pull rig/well/field/tool/mud info from table 0
+    if tables:
+        t0 = tables[0]
+        for row in t0.rows:
+            cells = _row_cells(row)
 
-    # =====================================================================
-    # MUD CHECKS  (rows 15-21, cols W-Z interleaved)
-    #   Row 15: W=Densit� label, X=1.45 (density value), Y=VB
-    #   Row 16: W=V.Marsh label, X=49 (FV), Y=Y.p label, Z=25 (YP)
-    #   Row 17: W=Filtrat label, X=4, Y=Gel 0  (Z17 may have gel0 value)
-    #   Row 18: W=Sabl% label, X=0, Y=Gel 10   (Z18 may have gel10 value)
-    #   Row 19: W=Solide% label, X=0.1, Y=PB, AC=value (decimal day fraction)
-    #   Row 20: W=Huile label, X=0.9, Y=PV
-    #   Row 21: W=H/E label, X=90/10 ratio, Y=LGS
-    # =====================================================================
-    mud_checks = {}
-    if mud_type:
-        mud_checks["mud_type"] = mud_type
+            puits = _find_value_after(cells, "puits")
+            if puits and "well_name" not in header:
+                header["well_name"] = puits.replace(" ", "")
+            champ = _find_value_after(cells, "champ")
+            if champ and "field_name" not in header:
+                header["field_name"] = champ
+            app = _find_value_after(cells, "appareil")
+            if app and "rig_name" not in header:
+                header["rig_name"] = _normalize_rig(app)
 
-    # Row 15: Densit� at W15, value at X15
-    v = _cell(ws, 15, 24, L)                                   # X15
-    if v is not None: mud_checks["density"] = _float(v)
+            # Tubing / completion tool designation (replaces TP-186's BHA/bit fields)
+            desig = _find_value_after(cells, "désignation")
+            if desig: header["_tool_designation"] = desig
+            tdiam = _find_value_after(cells, "diamètre")
+            if tdiam: header["_tool_diameter"] = tdiam
+            marque = _find_value_after(cells, "marque-type")
+            if marque: header["_tool_brand"] = marque
 
-    # Row 16: V.Marsh at W16, value at X16; YP at Z16
-    v = _cell(ws, 16, 24, L)                                   # X16
-    if v is not None: mud_checks["fun_vis"] = _float(v)
-    v = _cell(ws, 16, 26, L)                                   # Z16
-    if v is not None: mud_checks["yp"] = _float(v)
+            # Mud volumes
+            vt = _find_value_after(cells, "volume total")
+            if vt: header["_mud_total"] = vt
+            vs = _find_value_after(cells, "volume surface")
+            if vs: header["_mud_surface"] = vs
+            vp = _find_value_after(cells, "volume puits")
+            if vp: header["_mud_well"] = vp
 
-    # Row 17: Filtrat at W17, value at X17; Gel 0 label at Y17, value at Z17
-    v = _cell(ws, 17, 24, L)                                   # X17
-    if v is not None: mud_checks["apl_fl"] = _float(v)
-    v = _cell(ws, 17, 26, L)                                   # Z17
-    if v is not None:
-        try: mud_checks["gel10sec"] = _float(v)
-        except: pass
+            # Mud density / viscosity / type
+            for label, key in [("densité", "_density"), ("v. marsh", "_fun_vis"),
+                                ("type", "_mud_type")]:
+                v = _find_value_after(cells, label)
+                if v:
+                    header[key] = v
 
-    # Row 18: Sabl% at W18, value at X18; Gel 10 label at Y18, value at Z18
-    v = _cell(ws, 18, 24, L)                                   # X18
-    if v is not None: mud_checks["sand"] = _float(v)
-    v = _cell(ws, 18, 26, L)                                   # Z18
-    if v is not None:
-        try: mud_checks["gel10m"] = _float(v)
-        except: pass
+            # Filtrat here is a Huile/Eau (oil/water) split ratio, e.g. "90/10",
+            # not a single filtrate number — capture the label's *second*
+            # follow-on cell (the ratio), and the descriptive one separately.
+            for i, cell in enumerate(cells):
+                if re.sub(r"\s+", " ", cell.strip().lower()).startswith("filtrat"):
+                    if i + 1 < len(cells):
+                        header["_oil_water_label"] = cells[i + 1]
+                    if i + 2 < len(cells):
+                        header["_oil_water_ratio"] = cells[i + 2]
+                    break
 
-    # Row 19: Solide% at W19, value at X19; PB at Y19, value at AC19
-    v = _cell(ws, 19, 24, L)                                   # X19
-    if v is not None: mud_checks["solid"] = _float(v)
-    pb_val = _cell(ws, 19, 29, L)                              # AC19 (decimal day fraction)
-    if pb_val is not None:
-        try: mud_checks["pf"] = _float(pb_val)
-        except: pass
+            # Composition garniture (DP / DC)
+            dp = _find_value_after(cells, "dp (diam / nbre)")
+            if dp: header["_dp_composition"] = dp
+            dc = _find_value_after(cells, "dc (diam / nbre)")
+            if dc: header["_dc_composition"] = dc
 
-    # Row 20: Huile at W20, value at X20; PV at Y20, value at Z20
-    v = _cell(ws, 20, 24, L)                                   # X20
-    if v is not None: mud_checks["oil"] = _float(v)
-    pv_val = _cell(ws, 20, 26, L)                              # Z20
-    if pv_val is not None:
-        try: mud_checks["pv"] = _float(pv_val)
-        except: pass
-
-    # Row 21: H/E at W21, value at X21; LGS at Y21
-    he_val = _cell(ws, 21, 24, L)                              # X21
-    if he_val is not None:
-        s = _clean(he_val)
-        if s and "/" in s:
-            mud_checks["oil_water_ratio"] = s
-    lgs_val = _cell(ws, 21, 25, L)                             # Y21
-    if lgs_val is not None:
-        try: mud_checks["lgs"] = _float(lgs_val)
-        except: pass
-
-    # =====================================================================
-    # MUD VOLUMES (rows 12-14, col W labels, scan nearby cols for values)
-    #   W11=W14: labels in W11-Y14:
-    #     W11 "Perte formation", W12 "Tripping", W13 "Volume puits (m3)",
-    #     W14 "Volume surface (m3)"
-    #   Values are around col 23-26 area. Let's read from known positions.
-    #   Based on the layout these are near the mud panel (W/Y area).
-    #   Row 13 col Z or AA = Volume puits value
-    #   Row 14 col Z or AA = Volume surface value
-    #   Row 11 col Z or AA = Perte formation value
-    # =====================================================================
-    mud_volume = {}
-    # Volume puits
-    for c in range(23, 30):
-        v = _cell(ws, 13, c, L)
-        if v is not None:
-            try:
-                mud_volume["string_volume"] = _float(v)
-                break
-            except: pass
-    # Volume surface
-    for c in range(23, 30):
-        v = _cell(ws, 14, c, L)
-        if v is not None:
-            try:
-                mud_volume["pits_volume"] = _float(v)
-                break
-            except: pass
-    # Perte formation
-    for c in range(23, 30):
-        v = _cell(ws, 11, c, L)
-        if v is not None:
-            try:
-                mud_volume["formation_loss"] = _float(v)
-                break
-            except: pass
-    # Perte surface
-    for c in range(23, 30):
-        v = _cell(ws, 12, c, L)
-        if v is not None:
-            try:
-                if "Tripping" in _clean(_cell(ws, 12, 23, L) or ""):
-                    continue
-                mud_volume["surface_loss"] = _float(v)
-                break
-            except: pass
-    if mud_volume:
-        parts = [v for v in (mud_volume.get("string_volume"),
-                              mud_volume.get("pits_volume"))
-                 if isinstance(v, (int, float)) and v]
-        if parts:
-            mud_volume["total_volume"] = sum(parts)
+    # Supervisor — paragraph after "Responsable de la Section"
+    for i, p in enumerate(paragraphs):
+        if "RESPONSABLE" in p.upper() and "SECTION" in p.upper():
+            for j in range(i + 1, min(i + 6, len(paragraphs))):
+                cand = paragraphs[j]
+                if cand and len(cand) < 60 and not cand.startswith(("S", "RAPPORT", "OPERATION")):
+                    if re.match(r"^[A-Z][\.\s]", cand) or "." in cand[:5]:
+                        header["supervisor"] = cand
+                        break
+            break
 
     # =====================================================================
-    # TARIF TOTALS (row 21: T1/T2/T3/T4 labels; row 22 col Q = total hours;
-    # row 29: ∑ + total hours)
-    # Per-op bill codes in col M, hours in col N.
-    # =====================================================================
-    tarif_totals = {}
-
-    # Read T1/T2/T3/T4 total hours from row 29 col N (∑ row)
-    total_hrs = _cell(ws, 29, 14, L)                            # N29
-    if total_hrs is not None:
-        try:
-            th = _float(total_hrs)
-        except:
-            th = 0.0
-    else:
-        th = 0.0
-
-    # Also check tarif labels at row 21 cols Q/S/T/U for per-code totals
-    for code, col in [("t1", 17), ("t2", 19), ("t3", 20), ("t4", 21)]:
-        v = _cell(ws, 21, col, L)                               # Q21="T1", etc.
-        # These are just labels here; the totals come from summing per-op hours
-        pass
-
-    # =====================================================================
-    # OPERATIONS  (rows 24+, header at row 22: A=Horaire B=A C=desc M=code N=hours)
-    # Stop at blank rows or end-of-ops markers (∑ row 29 marks the end).
+    # OPERATIONS (table 1)
+    # Layout: a single row with two parallel cells — cell 0 holds time
+    # bands ('HHhMM-HHhMM' newline-separated), cell 1 holds the matching
+    # descriptions (also newline-separated), aligned by line index. The
+    # header row spells this "HORAIRE" or (typo) "HORRAIRE".
     # =====================================================================
     activities = []
-    for row in range(24, 30):                                   # rows 24-29
-        start = _cell(ws, row,  1, L)                            # A
-        end   = _cell(ws, row,  2, L)                            # B
-        desc  = _clean(_cell(ws, row,  3, L) or "")              # C
-        code  = _clean(_cell(ws, row, 13, L) or "")              # M
-        hrs   = _cell(ws, row, 14, L)                            # N
+    if len(tables) > 1:
+        t1 = tables[1]
+        for ri, row in enumerate(t1.rows):
+            cells = _row_cells(row)
+            if _is_horaire_header(cells):
+                if ri + 1 < len(t1.rows):
+                    data_cells = _row_cells(t1.rows[ri + 1])
+                    if len(data_cells) >= 2:
+                        time_lines = data_cells[0].split("\n")
+                        desc_lines = data_cells[1].split("\n")
+                        activities = _parse_parallel_ops(time_lines, desc_lines)
+                break
 
-        # Stop at summary/total row
-        if "∑" in code.upper() or "SOMMA" in code.upper() or "TOTAL" in code.upper():
+    # =====================================================================
+    # TARIF TOTALS (table 2) — rows labelled "T. 1" / "T. 2" / "T. 3" / "T. 4"
+    # (dot+space variant of TP-186's "T1"/"T2"); "N/R" rows are ignored.
+    # =====================================================================
+    tarif_totals = {}
+    if len(tables) > 2:
+        t2 = tables[2]
+        for row in t2.rows:
+            cells = _row_cells(row)
+            if len(cells) < 2: continue
+            label = _clean(cells[0]).upper().replace(" ", "").replace(".", "")
+            if label in ("T1", "T2", "T3", "T4"):
+                hrs = _parse_hhmm_duration(cells[1])
+                if hrs > 0:
+                    tarif_totals[label.lower()] = hrs
+
+    # Back-fill bill codes via the shared helper
+    from helpers.bill_code_assign import assign_bill_codes
+    activities = assign_bill_codes(activities, tarif_totals)
+
+    # =====================================================================
+    # COSTS
+    # Preferred source: explicit "Coût journalier" cell in table 1.
+    # Fallback: table 2 TOTAL row's rightmost monetary value (TP-186 style).
+    # =====================================================================
+    if len(tables) > 1:
+        for row in tables[1].rows:
+            cells = _row_cells(row)
+            if cells and "COÛT JOURNALIER" in cells[0].upper():
+                if len(cells) > 1:
+                    v = _money_to_int(cells[1])
+                    if v > 0:
+                        header["daily_cost"] = v
+                break
+
+    if "daily_cost" not in header and len(tables) > 2:
+        t2 = tables[2]
+        for row in t2.rows:
+            cells = _row_cells(row)
+            if cells and "TOTAL" in cells[0].upper():
+                for c in reversed(cells):
+                    if "DA" in c.upper():
+                        v = _money_to_int(c)
+                        if v > 0:
+                            header["daily_cost"] = v
+                            break
+                break
+
+    # Cumul depuis origine — paragraph
+    for p in paragraphs:
+        if "CUMUL DEPUIS ORIGINE" in p.upper() and "APPAREIL" in p.upper():
+            v = _money_to_int(p)
+            if v > 0:
+                header["cum_cost"] = v
+                break
+
+    # Cumul depuis origine — autres sociétés (service companies), if present
+    for p in paragraphs:
+        if "CUMUL DEPUIS ORIGINE" in p.upper() and "SOCIETES" in p.upper():
+            v = _money_to_int(p)
+            if v > 0:
+                header["cum_cost_other_companies"] = v
             break
-        # Stop at section headers below ops
-        if "APRÈS MINUIT" in desc.upper() or "APRES MINUIT" in desc.upper():
-            break
-
-        start_t = _time_parse(start)
-        end_t   = _time_parse(end)
-
-        if start_t is not None and end_t is not None:
-            hours = 0.0
-            if isinstance(hrs, (int, float)):
-                hours = float(hrs)
-            elif hrs is not None:
-                hours = _duration_hours(hrs)
-            if hours == 0.0:
-                sm = start_t.hour * 60 + start_t.minute
-                em = end_t.hour * 60 + end_t.minute
-                if em == sm: hours = 24.0
-                elif em > sm: hours = (em - sm) / 60.0
-                else: hours = (em + 1440 - sm) / 60.0
-
-            activities.append({
-                "start_time": start_t,
-                "end_time":   end_t,
-                "hours":      hours,
-                "phase_name": "",
-                "code": "", "sub": "",
-                "description": desc,
-                "start_md": 0, "end_md": 0,
-                "npt": 0, "npt_detail": "",
-                "npt_company": "", "op_company": "",
-                "bill": code.upper(),
-            })
-        elif desc and activities:
-            activities[-1]["description"] = (
-                activities[-1]["description"] + "\n" + desc
-            ).strip()
-
-    # Derive tarif totals from per-op bill codes
-    if not tarif_totals:
-        for a in activities:
-            code = _clean(a.get("bill")).lower()
-            if re.match(r"^t\d+$", code):
-                tarif_totals[code] = tarif_totals.get(code, 0.0) + a.get("hours", 0.0)
 
     # =====================================================================
-    # AFTER MIDNIGHT (rows 31-32, col C)
+    # MUD CHECKS + VOLUMES + TOOL/COMPOSITION (parsed from stashed header values)
     # =====================================================================
-    text_sections = {}
-    am_parts = []
-    for r in range(31, 35):
-        c_val = _clean(_cell(ws, r, 3, L) or "")
-        if not c_val:
-            continue
-        if c_val.upper().startswith("APR"):
-            continue  # skip the label row itself
-        if any(t in c_val.upper() for t in ("SITUATION", "PROGRAMME", "NOTE:")):
-            break
-        am_parts.append(c_val)
-    if am_parts:
-        text_sections["after_midnight"] = " | ".join(am_parts)
+    mud_checks = {}
+    mud_volume = {}
+    for src_key, dst_key in [("_density", "density"), ("_fun_vis", "fun_vis")]:
+        raw = header.pop(src_key, None)
+        if raw is not None:
+            v = _float(raw)
+            if v: mud_checks[dst_key] = v
+
+    mt = header.pop("_mud_type", None)
+    if mt and mt.lower() in ("huile", "obm", "oil", "wbm", "water"):
+        mud_checks["mud_type"] = mt
+
+    # Oil/water filtrat split ratio — kept as text, not forced into a float
+    ow_label = header.pop("_oil_water_label", None)
+    ow_ratio = header.pop("_oil_water_ratio", None)
+    if ow_ratio:
+        mud_checks["oil_water_ratio"] = ow_ratio
+        if ow_label:
+            mud_checks["oil_water_label"] = ow_label
+
+    for src_key, dst_key in [("_mud_total", "total_volume"),
+                              ("_mud_surface", "pits_volume"),
+                              ("_mud_well", "string_volume")]:
+        raw = header.pop(src_key, None)
+        if raw is not None:
+            v = _float(raw)
+            if v: mud_volume[dst_key] = v
+
+    # Tool / completion string + garniture composition
+    tool_info = {}
+    for src_key, dst_key in [("_tool_designation", "designation"),
+                              ("_tool_diameter", "diameter"),
+                              ("_tool_brand", "brand"),
+                              ("_dp_composition", "dp_composition"),
+                              ("_dc_composition", "dc_composition")]:
+        raw = header.pop(src_key, None)
+        if raw: tool_info[dst_key] = _clean(raw)
+    if tool_info:
+        header["tool_info"] = tool_info
+
+    # Strip any remaining temporary keys
+    for k in list(header.keys()):
+        if k.startswith("_"):
+            header.pop(k, None)
 
     # =====================================================================
-    # SITUATION + PROGRAMME (rows 38-39, col A label, col D value)
-    # =====================================================================
-    sit_label = _clean(_cell(ws, 38, 1, L) or "")               # A38
-    if "SITUATION" in sit_label.upper():
-        sit_val = _clean(_cell(ws, 38, 4, L) or "")             # D38
-        if sit_val:
-            if len(sit_val) > 300:
-                sit_val = sit_val[:300].rsplit(None, 1)[0] + "\u2026"
-            text_sections["current_operation"] = sit_val
-            text_sections["day_summary"]       = sit_val
-
-    plan_label = _clean(_cell(ws, 39, 1, L) or "")              # A39
-    if "PROGRAMME" in plan_label.upper() or "PROGRAM" in plan_label.upper():
-        plan_val = _clean(_cell(ws, 39, 4, L) or "")            # D39
-        if plan_val:
-            text_sections["plan_operations"] = plan_val
-
-    # =====================================================================
-    # SUPERVISOR / PERSONNEL (rows 38-39, cols W)
-    #   W38: "Représentant SH/DP" label, W39: supervisor name
-    # =====================================================================
-    personnel = []
-    sup_label = _clean(_cell(ws, 38, 23, L) or "")              # W38
-    sup_name  = _clean(_cell(ws, 39, 23, L) or "")              # W39
-    if "REPRÉSENTANT" in sup_label.upper() or "REPRESENTANT" in sup_label.upper() or "SH/DP" in sup_label.upper():
-        if sup_name:
-            header["supervisor"] = sup_name
-    elif sup_name:
-        # No explicit label but name present
-        header["supervisor"] = sup_name
-
-    # =====================================================================
-    # MUD CHEMICAL USAGE
-    #   Row 22 col W: "PRODUITS" header
-    #   Rows 24+: W=item, Y=used (merged with AA..AC), Z=stock
-    #   Row 23 col Y: "Utilisé", col Z: "Stock"
+    # MUD CHEMICAL USAGE (table 1: a sub-row after "DESIGNATIONS")
     # =====================================================================
     chemicals = []
-    for row in range(24, ws.max_row + 1):
-        item = _clean(_cell(ws, row, 23, L) or "")              # W
-        if not item or item.upper() in ("PRODUITS",):
-            continue
-        # Stop at non-chemical rows
-        o = _clean(_cell(ws, row, 15, L) or "")
-        if o.upper() in ("COUTS", "JOURNALIER", "CUMUL",
-                          "MATERIELS EN LOCATION",
-                          "DERNIÈRE DATE TEST BOP",
-                          "DERNIERE DATE TEST BOP"):
-            break
-        used = _cell(ws, row, 25, L)                            # Y (merged Y:AA)
-        stock = _cell(ws, row, 26, L)                           # Z
-        # Filter out rows where the "item" cell is actually a date or non-chemical
-        if re.match(r"^\d{4}[-/]", item) or len(item) > 60:
-            continue
-        chemicals.append({
-            "item":     item,
-            "units":    "",
-            "received": "",
-            "used":     _clean(str(used)  if used  is not None else ""),
-            "on_loc":   _clean(str(stock) if stock is not None else ""),
-        })
+    if len(tables) > 1:
+        t1 = tables[1]
+        for ri, row in enumerate(t1.rows):
+            cells = _row_cells(row)
+            if any("DESIGNATION" in c.upper() for c in cells):
+                if ri + 1 < len(t1.rows):
+                    next_cells = _row_cells(t1.rows[ri + 1])
+                    if len(next_cells) >= 3:
+                        items = next_cells[0].split("\n")
+                        useds  = next_cells[1].split("\n") if next_cells[1] else []
+                        stocks = next_cells[2].split("\n") if next_cells[2] else []
+                        for i, item in enumerate(items):
+                            item = item.strip()
+                            if not item: continue
+                            chemicals.append({
+                                "item": item,
+                                "units": "",
+                                "received": "",
+                                "used":   (useds[i].strip() if i < len(useds) else ""),
+                                "on_loc": (stocks[i].strip() if i < len(stocks) else ""),
+                            })
+                break
 
     # =====================================================================
-    # NOTE / REMARKS (row 35, col C)
+    # TEXT SECTIONS (table 1: "Situation à 06h00" and "Programme prévu")
     # =====================================================================
-    note = _clean(_cell(ws, 35, 3, L) or "")
-    if note:
-        text_sections["remarks"] = note
+    text_sections = {}
+    if len(tables) > 1:
+        for row in tables[1].rows:
+            cells = _row_cells(row)
+            if not cells: continue
+            label = cells[0].upper() if cells[0] else ""
+            value = cells[1] if len(cells) > 1 else ""
+            value_clean = _clean(value)
+            if not value_clean: continue
+            if "SITUATION" in label:
+                if len(value_clean) > 300:
+                    value_clean = value_clean[:300].rsplit(None, 1)[0] + "…"
+                text_sections["current_operation"] = value_clean
+                text_sections["day_summary"]       = value_clean
+            elif "PROGRAMME" in label:
+                text_sections["plan_operations"] = value_clean
 
     # =====================================================================
-    # BOP TEST (row 37, label at O37, date at T37)
+    # SERVICE COMPANIES (table 3)
     # =====================================================================
-    bop_label = _clean(_cell(ws, 37, 15, L) or "")              # O37
-    if "BOP" in bop_label.upper():
-        bop_val = _cell(ws, 37, 20, L)                           # T37
-        if bop_val:
-            d = _date_parse(bop_val)
-            if d:
-                header["bop_test"] = d
-
-    wb.close()
+    service_companies = []
+    if len(tables) > 3:
+        for row in tables[3].rows:
+            cells = _row_cells(row)
+            if len(cells) < 3: continue
+            name = cells[0].strip()
+            if not name or name.upper() in ("SOCIETES", "TOTAL"): continue
+            if name in ("/",): continue
+            service_companies.append({
+                "company": name,
+                "nature":  cells[1].strip(),
+                "amount":  _money_to_int(cells[2]),
+            })
 
     return {
         "header": header,
@@ -524,12 +683,13 @@ def parse_enf08(source: Union[Path, str, BytesIO]) -> dict:
         "mud_checks": mud_checks,
         "mud_volume": mud_volume,
         "mud_chemical_usage": chemicals,
-        "personnel_data": personnel,
+        "personnel_data": [],
         "pumps": [],
         "well_location": {},
         "survey_data": [],
         "safety": {},
         "tarif_totals": tarif_totals,
+        "service_companies": service_companies,
     }
 
 
@@ -540,7 +700,7 @@ parse_daily_excel_report = parse_enf08
 if __name__ == "__main__":
     import sys, json
     if len(sys.argv) < 2:
-        sys.exit("Usage: enf08_extract.py SOURCE.xlsx")
+        sys.exit("Usage: enf08_extract.py SOURCE.doc|SOURCE.docx")
     data = parse_enf08(Path(sys.argv[1]))
 
     def default(o):

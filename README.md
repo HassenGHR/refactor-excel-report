@@ -22,6 +22,7 @@ FastAPI `/v1/excel_import/upload` endpoint can ingest.
 │   ├── enf34_pdf_extract.py    # ENAFOR rig 34, Gassi-Touil PDF
 │   ├── entp127_extract.py      # ENTP DF rig 127, DAD wells, English template
 │   ├── entp204_extract.py      # ENTP rig 204, AIN T'SILA / TXNO wells
+│   ├── entp27_extract.py       # ENTP rig 27, RAP report family (delegates to TP-189)
 │   ├── gw29_extract.py         # GW-29 / TP-127 layout family — French template (GWDC REB + DRAA DAOUI)
 │   ├── rnse08_extract.py       # ENTP rig 188, RNSE wells (Word .doc/.docx)
 │   ├── tp173_extract.py        # ENTP rig 173, ADRAR / ODZ wells
@@ -30,10 +31,14 @@ FastAPI `/v1/excel_import/upload` endpoint can ingest.
 │   ├── tp183_extract.py        # ENTP rig 183, TMLS wells
 │   ├── tp185_extract.py        # ENTP rig 185, Hassi Messaoud workover (.xls)
 │   ├── tp186_extract.py        # ENTP rig 186, ZARZAITINE telex (Word .doc/.docx)
+│   ├── tp189_extract.py        # ENTP rig 189 / RAP ENTP N°27, daily report family
 │   ├── tp195_extract.py        # ENTP rig 195, AIN T'SILA / AT wells
+│   ├── tp212_extract.py        # TP-212, Excel-exported PDF workover report
 │   ├── tp215_extract.py        # TP#215, Haoud Berkaoui workover
+│   ├── tp217_extract.py        # TP-217, Excel-exported PDF workover report
 │   ├── tp219_extract.py        # ENTP rig 219, Hassi Messaoud daily work-over (.xlsx)
-│   └── tp236_extract.py        # ENTP rig 236, ADRAR workover
+│   ├── tp236_extract.py        # ENTP rig 236, ADRAR workover
+│   └── tp237_extract.py        # TP-237, DTM PDF daily report family
 ├── helpers/
 │   ├── __init__.py
 │   ├── bill_code_assign.py     # Bill-code partitioning + normalization
@@ -110,25 +115,31 @@ warning, while errors are reported per file.
 | enf08_extract        | ENF#08 | .xlsx       | Daily Workover Report            |
 | enf10_extract        | ENF#10 | .xlsx       | Haoud Berkaoui workover          |
 | enf17_extract        | ENF#17 | .xlsx       | DDR English (OpenWells)          |
+| enf18_extract        | ENF#18 | .xlsx       | ENF#18 workover report          |
 | enf24_extract        | ENF#24 | .xlsx       | Newer ENF DDR (header shift)     |
 | enf27_extract        | ENF#27 | .xlsx       | DIRECTION REGIONALE OHANET       |
 | enf30_extract        | ENF#30 | .xlsx       | Haoud Berkaoui workover          |
 | enf33_extract        | ENF#33 | .xlsx/.xlsm | DDR English, BERKINE/BKNS wells  |
+| enf34_pdf_extract    | ENF#34 | .pdf        | Gassi-Touil PDF                  |
+| entp127_extract      | ENTP TP-127 | .xlsx   | DAD wells, DRAA DAOUI, English   |
+| entp204_extract      | ENTP-204 | .xlsx      | AIN T'SILA, TXNO, LABEL:value    |
+| entp27_extract       | ENTP-27 | .xlsx      | RAP ENTP N°27 / TP-189 family    |
+| gw29_extract         | GW29 / TP-127 | .xlsx  | GWDC REB · TP-127 DRAA DAOUI (French) |
+| rnse08_extract       | TP-188 | .doc, .docx | RNSE wells, ops-table format     |
 | tp173_extract        | TP-173 | .xlsx       | ADRAR, ODZ wells                 |
 | tp179_extract        | TP-179 | .xlsx       | ADRAR, HTJW wells                |
 | tp182_extract        | TP-182 | .xlsx       | SONATRACH PRODUCTION / WIH       |
 | tp183_extract        | TP-183 | .xlsx       | TMLS, single-sheet               |
 | tp185_extract        | TP-185 | .xls        | Hassi Messaoud workover (OLE2)   |
 | tp186_extract        | TP-186 | .doc, .docx | ZR wells, ZARZAITINE telex       |
+| tp189_extract        | TP-189 | .xlsx       | RAP ENTP report family           |
 | tp195_extract        | TP-195 | .xlsx       | AIN T'SILA, OFFICE REP           |
+| tp212_extract        | TP-212 | .pdf        | Excel-exported PDF workover report |
 | tp215_extract        | TP#215 | .xlsx       | Haoud Berkaoui workover          |
+| tp217_extract        | TP-217 | .pdf        | Excel-exported PDF workover report |
 | tp219_extract        | ENTP-219 | .xlsx     | Hassi Messaoud daily work-over   |
 | tp236_extract        | TP-236 | .xlsx       | ADRAR workover                   |
-| rnse08_extract       | TP-188 | .doc, .docx | RNSE wells, ops-table format     |
-| entp204_extract      | ENTP-204 | .xlsx      | AIN T'SILA, TXNO, LABEL:value    |
-| entp127_extract      | ENTP TP-127 | .xlsx   | DAD wells, DRAA DAOUI, English   |
-| gw29_extract         | GW29 / TP-127 | .xlsx  | GWDC REB · TP-127 DRAA DAOUI (French) |
-| enf34_pdf_extract    | ENF#34 | .pdf        | Gassi-Touil PDF                  |
+| tp237_extract        | TP-237 | .pdf        | DTM PDF daily report family      |
 
 ### Word .doc support
 

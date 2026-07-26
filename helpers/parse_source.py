@@ -188,6 +188,37 @@ def _detect_format_xlsx(source) -> str:
             or "DAILY WORK-OVER REPORT" in blob):
         return "tp219"
 
+    # ENF#18 — ENF rig 18 native .xlsx workover report. Distinctive banner
+    # "DIVISION PRODUCTION / RAPPORT JOURNALIER WORK-OVER" and either a
+    # specific rig identifier or ETP/ENF 18 reference in the header.
+    if ("DIVISION PRODUCTION" in blob and "RAPPORT JOURNALIER WORK-OVER" in blob
+            or re.search(r"\bENF\s*#?\s*18\b", blob)
+            or re.search(r"\bENTP\s*#?\s*18\b", blob)):
+        return "enf18"
+
+    # ENTP-27 — some TP-189 files include an ENTP N°27 rig identifier in the
+    # header (filename examples: "RAP ENTP N°27 TP189 ...").  These use the
+    # same RAP ENTP layout as TP-189; detect and route them explicitly so
+    # they don't fall through to unknown when the generic TP-189 markers
+    # are slightly different.
+    if re.search(r"\bENTP\s*(?:N°|N|#)?\s*27\b", blob) or "ENTP N\u00B027" in blob:
+        return "entp27"
+
+    # TP-189 — ENTP "RAP ENTP" wide single-sheet daily drilling report
+    # (modern .xlsx, ~65 rows x 24 cols).  Filename pattern
+    # RAP_ENTP_N_<report#>_<rig>_MD_<well>_DU_*.  Distinctive markers:
+    # "RAP ENTP" title/banner, "DRILL STRING TALLY" section, "BHA COMPONENT
+    # TALLY", and "inventaire tubulaire" (tubular inventory).  Must be
+    # checked BEFORE any generic DDR catch-all since it shares some English
+    # labels with other ENTP templates.
+    if ("RAP ENTP" in blob
+            or "DRILL STRING" in blob
+            or "BHA COMPONENT" in blob
+            or "inventaire tubulaire" in blob
+            or "TP189" in blob
+            or re.search(r"\bTP\s*-?\s*189\b", blob)):
+        return "tp189"
+
     # GW29 layout family — French "Rapport journalier de Work - Over" with
     # the AVANCEMENT / OUTILS / USURE / PARAMETRES section headers at row 3
     # and the wide header in rows 1-2 (label/value pairs).  Originally for
@@ -284,6 +315,40 @@ def _detect_format_pdf(source) -> str:
             blob = " || ".join(
                 (p.extract_text() or "").upper() for p in pages_to_scan
             )
+
+    # ENF-03 — Excel-exported PDF report from ENF-03 / HR-152 / HRM.
+    # Distinctive markers: "RAPPORT JOURNALIER" + "WORK OVER" +
+    # "APPAREIL: ENF 03" or both "PUITS: HR" and "CHAMP: HRM".
+    if ("RAPPORT JOURNALIER" in blob and "WORK OVER" in blob
+            and (re.search(r"\bAPPAREIL:\s*ENF\s*03\b", blob)
+                 or (re.search(r"\bPUITS[:\s]+HR\b", blob)
+                     and "CHAMP: HRM" in blob))):
+        return "enf03"
+
+    # TP-212 — Excel-exported PDF report from TP-212 / HRZ-007.
+    # Distinctive markers: "RAPPORT JOURNALIER" + "WORK OVER" +
+    # "APPAREIL:TP 212" or "PUITS: HRZ".
+    if ("RAPPORT JOURNALIER" in blob and "WORK OVER" in blob
+            and ("APPAREIL:TP 212" in blob
+                 or re.search(r"\bPUITS[:\s]+HRZ\b", blob))):
+        return "tp212"
+
+    # TP-217 — Excel-exported PDF report from TP-217 / ONRS-01 / HRM.
+    # Distinctive markers: "RAPPORT JOURNALIER" + "WORK OVER" +
+    # "APPAREIL:TP 217" or "PUITS: ONRS".
+    if ("RAPPORT JOURNALIER" in blob and "WORK OVER" in blob
+            and ("APPAREIL:TP 217" in blob
+                 or re.search(r"\bPUITS[:\s]+ONRS\b", blob))):
+        return "tp217"
+
+    # TP-237 — Excel-exported PDF report from TP-237 / HR-128 / HRM.
+    # Distinctive markers: "RAPPORT JOURNALIER" + "DTM" +
+    # "APPAREIL: TP 237" or well/field markers like HR + HRM.
+    if ("RAPPORT JOURNALIER" in blob and "DTM" in blob
+            and (re.search(r"\bAPPAREIL:\s*TP\s*[- ]?\s*237\b", blob)
+                 or (re.search(r"\bPUITS[:\s]+HR\b", blob)
+                     and "CHAMP: HRM" in blob))):
+        return "tp237"
 
     # ENF#34 — Gassi-Touil workover PDF (this is the first PDF format we
     # support).  Distinguishing markers: "GASSI" + "RAPPORT JOURNALIER DE
@@ -398,6 +463,14 @@ def _detect_format_word(source) -> str:
             or "TP 188" in blob or "TP-188" in blob):
         return "rnse08"
 
+    # ENF-08 — ENAFOR rig 08 Word report.  Same overall title as TP-186
+    # but distinguished by the ENF rig number plus its ISNO/TINRHERT markers.
+    if ("RAPPORT JOURNALIER WORK-OVER" in blob
+            and (re.search(r"\bENF\s*#?\s*08\b", blob)
+                 or "TINRHERT" in blob
+                 or re.search(r"\bISNO[-\s]?\d+\b", blob))):
+        return "enf08"
+
     # TP-186 — ENTP rig 186, ZR wells, ZARZAITINE field, telex-style
     # Word .doc/.docx.  Distinguishing markers:
     #   - "RAPPORT JOURNALIER WORK-OVER" (hyphenated)
@@ -487,6 +560,15 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
     elif fmt == "tp219":
         from extractors.tp219_extract import parse_entp219
         data = parse_entp219(source)
+    elif fmt == "enf18":
+        from extractors.enf18_extract import parse_enf18_report
+        data = parse_enf18_report(source)
+    elif fmt == "entp27":
+        from extractors.entp27_extract import parse_entp27
+        data = parse_entp27(source)
+    elif fmt == "tp189":
+        from extractors.tp189_extract import parse_rap_entp
+        data = parse_rap_entp(source)
     elif fmt == "gw29":
         from extractors.gw29_extract import parse_gw29
         data = parse_gw29(source)
@@ -503,11 +585,26 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
     elif fmt == "enf34_pdf":
         from extractors.enf34_pdf_extract import parse_enf34_pdf
         data = parse_enf34_pdf(source)
+    elif fmt == "tp212":
+        from extractors.tp212_extract import parse_tp212
+        data = parse_tp212(source)
+    elif fmt == "tp217":
+        from extractors.tp217_extract import parse_tp217
+        data = parse_tp217(source)
+    elif fmt == "tp237":
+        from extractors.tp237_extract import parse_tp237
+        data = parse_tp237(source)
+    elif fmt == "enf03":
+        from extractors.enf03_extract import parse_enf03
+        data = parse_enf03(source)
 
     # Word-backed extractors (.doc auto-converted via LibreOffice → .docx)
     elif fmt == "tp186":
         from extractors.tp186_extract import parse_tp186
         data = parse_tp186(source)
+    elif fmt == "enf08":
+        from extractors.enf08_extract import parse_enf08
+        data = parse_enf08(source)
     elif fmt == "rnse08":
         from extractors.rnse08_extract import parse_rnse08
         data = parse_rnse08(source)

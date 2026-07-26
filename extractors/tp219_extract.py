@@ -241,18 +241,33 @@ def parse_entp219(source: Union[Path, str, BytesIO]) -> dict:
     # =====================================================================
     # HEADER  (rows 3-7) — date, report N°, well/rig/casing block.
     # =====================================================================
+    # NOTE: on this template the DATE and DWR-REPORT-N° VALUES sit one row
+    # BELOW their labels (same column) — e.g. label "La date" at W3, value
+    # at W4 — not to the right of the label on the same row. The original
+    # same-row _value_after() scan missed this, landed on an unrelated cell
+    # a few columns over, failed to parse as a date, and left header["date"]
+    # unset (which is why callers were falling back to today's date). Check
+    # directly below the label first; fall back to the same-row scan for
+    # report instances that might lay it out the other way.
     date_pos = _find_row(ws, L, ("LA DATE",), (1, 6), (1, 30))
     if date_pos:
-        v = _value_after(ws, L, date_pos[0], date_pos[1], spans=S)
-        d = _date_parse(v)
+        below = _cell(ws, date_pos[0] + 1, date_pos[1], L)
+        d = _date_parse(below)
+        if not d:
+            v = _value_after(ws, L, date_pos[0], date_pos[1], spans=S)
+            d = _date_parse(v)
         if d: header["date"] = d
 
     dwr_pos = _find_row(ws, L, ("DWR REPORT",), (1, 6), (1, 30))
     if dwr_pos:
-        raw = _clean(_cell(ws, dwr_pos[0], dwr_pos[1], L) or "")
-        m = re.search(r"(\d+)", raw)
-        if m:
-            header["day_number"] = int(m.group(1))
+        below = _cell(ws, dwr_pos[0] + 1, dwr_pos[1], L)
+        if isinstance(below, (int, float)):
+            header["day_number"] = int(below)
+        else:
+            raw = _clean(_cell(ws, dwr_pos[0], dwr_pos[1], L) or "")
+            m = re.search(r"(\d+)", raw)
+            if m:
+                header["day_number"] = int(m.group(1))
 
     well_pos = _find_row(ws, L, ("WELL",), (4, 9), (1, 10))
     if well_pos:
