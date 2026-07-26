@@ -31,6 +31,7 @@ FastAPI `/v1/excel_import/upload` endpoint can ingest.
 │   ├── tp183_extract.py        # ENTP rig 183, TMLS wells
 │   ├── tp185_extract.py        # ENTP rig 185, Hassi Messaoud workover (.xls)
 │   ├── tp186_extract.py        # ENTP rig 186, ZARZAITINE telex (Word .doc/.docx)
+│   ├── tp187_extract.py        # ENTP rig 187, TG-61 / IN AMENAS native Excel workover
 │   ├── tp189_extract.py        # ENTP rig 189 / RAP ENTP N°27, daily report family
 │   ├── tp195_extract.py        # ENTP rig 195, AIN T'SILA / AT wells
 │   ├── tp212_extract.py        # TP-212, Excel-exported PDF workover report
@@ -132,6 +133,7 @@ warning, while errors are reported per file.
 | tp183_extract        | TP-183 | .xlsx       | TMLS, single-sheet               |
 | tp185_extract        | TP-185 | .xls        | Hassi Messaoud workover (OLE2)   |
 | tp186_extract        | TP-186 | .doc, .docx | ZR wells, ZARZAITINE telex       |
+| tp187_extract        | TP-187 | .xlsx       | TG-61 / IN AMENAS native Excel workover |
 | tp189_extract        | TP-189 | .xlsx       | RAP ENTP report family           |
 | tp195_extract        | TP-195 | .xlsx       | AIN T'SILA, OFFICE REP           |
 | tp212_extract        | TP-212 | .pdf        | Excel-exported PDF workover report |
