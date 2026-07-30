@@ -370,6 +370,15 @@ def _detect_format_pdf(source) -> str:
                      and "CHAMP: HRM" in blob))):
         return "tp237"
 
+    # GWDC-155 — Excel-exported PDF report from GWDC-155 / HRLC-33 / HRM.
+    # Distinctive markers: "RAPPORT JOURNALIER" + "COMPLÉTION" +
+    # "APPAREIL: GWDC 155" or well/field markers like HRLC + HRM.
+    if ("RAPPORT JOURNALIER" in blob and "COMPLÉTION" in blob
+            and (re.search(r"\bAPPAREIL:\s*GWDC\s*[- ]?\s*155\b", blob)
+                 or (re.search(r"\bPUITS[:\s]+HRLC\b", blob)
+                     and "CHAMP: HRM" in blob))):
+        return "gwdc155"
+
     # ENF#34 — Gassi-Touil workover PDF (this is the first PDF format we
     # support).  Distinguishing markers: "GASSI" + "RAPPORT JOURNALIER DE
     # WORK OVER" (note the space in "WORK OVER" — TP-179 uses "WORKOVER").
@@ -620,6 +629,9 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
     elif fmt == "tp237":
         from extractors.tp237_extract import parse_tp237
         data = parse_tp237(source)
+    elif fmt == "gwdc155":
+        from extractors.gwdc155_extract import parse_gwdc155
+        data = parse_gwdc155(source)
     elif fmt == "enf03":
         from extractors.enf03_extract import parse_enf03
         data = parse_enf03(source)

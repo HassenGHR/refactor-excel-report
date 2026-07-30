@@ -25,6 +25,7 @@ FastAPI `/v1/excel_import/upload` endpoint can ingest.
 │   ├── entp204_extract.py      # ENTP rig 204, AIN T'SILA / TXNO wells
 │   ├── entp27_extract.py       # ENTP rig 27, RAP report family (delegates to TP-189)
 │   ├── gw29_extract.py         # GW-29 / TP-127 layout family — French template (GWDC REB + DRAA DAOUI)
+│   ├── gwdc155_extract.py      # GWDC-155, HRLC-33 / HRM completion PDF
 │   ├── rnse08_extract.py       # ENTP rig 188, RNSE wells (Word .doc/.docx)
 │   ├── tp173_extract.py        # ENTP rig 173, ADRAR / ODZ wells
 │   ├── tp179_extract.py        # ENTP rig 179, ADRAR / HTJW wells
@@ -128,6 +129,7 @@ warning, while errors are reported per file.
 | entp204_extract      | ENTP-204 | .xlsx      | AIN T'SILA, TXNO, LABEL:value    |
 | entp27_extract       | ENTP-27 | .xlsx      | RAP ENTP N°27 / TP-189 family    |
 | gw29_extract         | GW29 / TP-127 | .xlsx  | GWDC REB · TP-127 DRAA DAOUI (French) |
+| gwdc155_extract      | GWDC-155 | .pdf      | HRLC-33 / HRM completion report  |
 | rnse08_extract       | TP-188 | .doc, .docx | RNSE wells, ops-table format     |
 | tp173_extract        | TP-173 | .xlsx       | ADRAR, ODZ wells                 |
 | tp179_extract        | TP-179 | .xlsx       | ADRAR, HTJW wells                |
