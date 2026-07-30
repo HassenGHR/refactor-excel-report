@@ -10,6 +10,7 @@ FastAPI `/v1/excel_import/upload` endpoint can ingest.
 .
 ├── extractors/                 # Per-rig extraction modules
 │   ├── __init__.py
+│   ├── ades1_extract.py        # ADES-1, English-language work-over template
 │   ├── enf04_extract.py        # ENAFOR rig 04, Haoud Berkaoui (2 layouts)
 │   ├── enf06_extract.py        # ENAFOR rig 06, Daily Workover Report
 │   ├── enf08_extract.py        # ENAFOR rig 08, Daily Workover Report
@@ -111,6 +112,7 @@ warning, while errors are reported per file.
 
 | Module               | Rig    | Source type | Template                        |
 |----------------------|--------|-------------|----------------------------------|
+| ades1_extract        | ADES-1 | .xlsx       | English-language work-over      |
 | enf04_extract        | ENF#04 | .xlsx       | Haoud Berkaoui — Layouts A and B |
 | enf06_extract        | ENF#06 | .xlsx       | Daily Workover Report            |
 | enf08_extract        | ENF#08 | .xlsx       | Daily Workover Report            |

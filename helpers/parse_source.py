@@ -177,9 +177,19 @@ def _detect_format_xlsx(source) -> str:
             and ("TOOL PUSHER" in blob or "LAST BOP TEST" in blob)):
         return "entp127"
 
+    # ADES-1 — English-language daily work-over report template, sibling of
+    # GW-29/TP-127 layout.  Title "DAILY WORK OVER REPORT" (possibly with
+    # variable spacing, unlike ENTP-219).  Header block shifted down to rows
+    # 4-5.  Rig identifier "ADES-1" or "ADES" + "DIVISION PRODUCTION" banner.
+    # Must be checked BEFORE ENTP-219 since it also has "DAILY WORK" text.
+    if (re.search(r"DAILY\s+WORK\s+OVER\s+REPORT", blob)
+            and ("ADES-1" in blob or re.search(r"\bADES\b", blob))
+            and "DIVISION PRODUCTION" in blob):
+        return "ades1"
+
     # ENTP-219 — ENTP rig 219, SONATRACH DP Hassi Messaoud daily work-over
     # report (modern .xlsx, single sheet "DWR N°1").  English-labeled header;
-    # title "DAILY WORK-OVER REPORT" at J3 and a "WORK-OVER OPERATIONS"
+    # title "DAILY WORK-OVER REPORT" at J3 (with hyphen) and a "WORK-OVER OPERATIONS"
     # table header.  Distinct from the French RAPPORT JOURNALIER workover
     # templates (TP-173/TP-179/TP-236) and from TP-185 (which is legacy .xls
     # and shares the SHDP family but uses "RAPPORT JOURNALIER WORK OVER").
@@ -588,6 +598,9 @@ def parse_source(source: Union[Path, str, BytesIO]) -> dict:
     elif fmt == "enf04":
         from extractors.enf04_extract import parse_enf04
         data = parse_enf04(source)
+    elif fmt == "ades1":
+        from extractors.ades1_extract import parse_ades1
+        data = parse_ades1(source)
 
     # Legacy .xls extractor (xlrd-backed)
     elif fmt == "tp185":
