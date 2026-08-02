@@ -290,11 +290,19 @@ def _label_value(grid, label: str, occurrence: int = 0) -> str:
 _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
 
 
+def _norm_time_token(s: str) -> str:
+    """Strip a stray leading/trailing colon typo sometimes present in the
+    source report (e.g. ':07:00' instead of '07:00') so the time band
+    still parses instead of the whole activity row being silently
+    dropped for lack of a matching end-time token."""
+    return s.strip().strip(":")
+
+
 def _parse_activities(page) -> List[dict]:
     words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
 
     # 1) Time-band anchors: pairs of HH:MM tokens in the leftmost column
-    time_words = [w for w in words if w["x0"] < 95 and _TIME_RE.match(w["text"])]
+    time_words = [w for w in words if w["x0"] < 95 and _TIME_RE.match(_norm_time_token(w["text"]))]
     by_top = {}
     for w in time_words:
         by_top.setdefault(round(w["top"], 1), []).append(w)
@@ -302,7 +310,8 @@ def _parse_activities(page) -> List[dict]:
     for top, ws in sorted(by_top.items()):
         ws = sorted(ws, key=lambda w: w["x0"])
         if len(ws) < 2: continue
-        m1, m2 = _TIME_RE.match(ws[0]["text"]), _TIME_RE.match(ws[1]["text"])
+        m1 = _TIME_RE.match(_norm_time_token(ws[0]["text"]))
+        m2 = _TIME_RE.match(_norm_time_token(ws[1]["text"]))
         if not (m1 and m2): continue
         st = time(int(m1.group(1)) % 24, int(m1.group(2)))
         et = time(int(m2.group(1)) % 24, int(m2.group(2)))
@@ -324,7 +333,15 @@ def _parse_activities(page) -> List[dict]:
 
     first_top = anchors[0]["top"]
     last_top = anchors[-1]["top"]
-    cutoff = last_top + 60  # drop stray labels (e.g. signature placeholders)
+    # The stray "Le Directeur Eng.& Prod." signature sits somewhere below
+    # the last real activity line, within the same tall merged cell. A
+    # fixed "+60pt" margin isn't always enough — reports with fewer/shorter
+    # activities push it visually closer to the last real line — so look
+    # for the actual signature text first and cut exactly above it;
+    # fall back to the margin heuristic only if it's not found.
+    directeur_tops = [w["top"] for w in words
+                      if "directeur" in w["text"].lower() and DESC_X0 <= w["x0"] < desc_x1]
+    cutoff = (min(directeur_tops) - 2) if directeur_tops else (last_top + 60)
     floor = first_top - 2   # drop page-header/title text above the block
     for top in sorted(lines_by_top):
         if top < floor or top > cutoff:
