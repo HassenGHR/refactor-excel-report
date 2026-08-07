@@ -1,86 +1,69 @@
 #!/usr/bin/env python3
 """
-tp127_extract.py — extract a TP-127 (rig) / DAD#1 (well) / DRAA DAOUI
-(field) Daily Work-Over Report ("DWOR") from a native .xlsx into the
-standard dict shape.
+tp196_extract.py — extract a TP-196 (rig) / OMJ-701 (well) / HMD (field)
+Daily Work-Over Report from a native .xlsx into the standard dict shape.
 
 Source layout
 -------------
-Modern .xlsx, single sheet named like "DWOR N°237-DAD#1ST TP127".
-Title at H1: "Rapport journalier de Work - Over". This is the "GW29"
-template family (shared with GW-series rigs — GWDC operator, RBL
-wells, REB field — confirmed identical layout to this TP-127 report),
-a dense single-sheet French drilling/workover report with granular
-engineering sections (tool wear, BHA composition, deviation surveys,
-drilling parameters) alongside the usual operations/mud/personnel data.
-
-NOTE: The file this extractor replaces (also named "tp127_extract.py")
-turned out to actually be `parse_source.py`, the format-detection
-dispatcher, not a real extractor — its own comments say TP-127 is
-handled by a shared `extractors/gw29_extract.py` module that wasn't
-available to compare against. This is a fresh, from-scratch extractor
-built directly from the report file's structure.
+Modern .xlsx, single sheet named like "Nr 06 Le 03-07-2017" (the sheet
+NAME's date is a stale leftover from an older report cycle — the real
+report date lives in the "DU" header cell and is read from there, not
+the sheet name). Title at H1: "Rapport journalier de Work - Over".
+Same GW29-family layout as tp127/tp183 (AVANCEMENT/OUTILS/USURE/
+PARAMETRES engineering sections, BHA composition, deviation surveys),
+with its own header/column offsets.
 
 Known layout notes
 -------------------
-* HEADER fields are mostly "label, then value a cell or two to the
-  RIGHT, same row" (e.g. "Puits" at A2, well name at B2; "Champ" at
-  D2, field at E2) — NOT the "value below the label" convention seen
-  in tp187_extract.py. A handful of labels are themselves merged
-  across 2+ columns (e.g. "Perte TRIPING" merged W6:Y6, its value at
-  Z6) — value lookups skip past the label's own merge span the same
-  way tp187_extract.py's TYPE BOUE fix does, for the same reason
-  (otherwise the merged-cell lookup reports the label's own text back
-  as if it were the value).
-* "Last Csg 7\"" (K2/L2, depth only — pipe size is embedded in the
-  label) and "Top Liner 7''" (N2/P2, e.g. "3354m") map onto the
-  standard last_csg_shoe / last_lnr_top fields. "TD" (S2/U2, e.g.
-  "3665m") is the well's total depth, a new field with no equivalent
-  in the other report families, so it gets its own `total_depth`.
-* TARIFICATION (O14 section header, T1-T4 columns at row 15) has a
-  "Jour" (daily) hours row and a "Cumul" (cumulative) row — but unlike
-  the sibling reports, only the DAILY row was filled in on the sample
-  report; the cumulative row is read the same way regardless.
-* ACTIVITIES: columns A=start, B=end, C=description (wide merge,
-  reads fine from its own top-left cell regardless), M=bill code,
-  N=hours (stored as an Excel TIME/DURATION value, e.g. time(11,0)
-  meaning "11 hours", not "11:00 AM" — read via the same convention
-  used for the H/Jour-style hour cells in the sibling extractors).
-  Consistent with the established fix (tp182/tp187): a row only counts
-  as a real operation if it has an explicit bill code. This report has
-  BOTH a trailing run of blank-bill placeholder rows in the main table
-  AND an "AFTER MIDNIGHT" section a few rows further down repeating
-  the same "ATTENTE CARBURANT" activity with a 00:00-04:30 time range
-  but no bill code of its own (a look-ahead into the next calendar
-  day's start, not part of today's billable hours — today's own 8
-  bill-coded rows already sum to exactly 24h on the sample report).
-  The bill-required filter naturally excludes both without needing to
-  special-case the "AFTER MIDNIGHT" marker text itself.
-* MUD CHECKS / mud volumes / PRODUITS (chemicals) / PERSONNEL all live
-  in a single dense block, columns W-Z, with the exact label/value
-  column spacing varying row to row (sometimes label spans W:X with
-  value at Y, sometimes label spans W:Y with value at Z) — read
-  generically via a span-aware value lookup rather than a fixed
-  column offset per field, the same approach as tp187_extract.py's
-  mud-checks scan.
-* Current drilling PARAMETRES (WOB/RPM/flow/pressure, S3 section
-  header) are real, distinct per-day operational figures (not mud
-  checks) — captured into their own `current_params` header field.
-* BHA composition (A12 "BHA#1:", value at B12) is a long free-text
-  string describing the full bottom-hole assembly — captured as
-  `bha_1` (and `bha_2` if a second one is filled in).
-* "Représentant SH/DP" (W41, value at W42) and vehicle info (O41
-  "Véhicule", type/registration in row 42) are both blank on the
-  sample report — read the same generic way, gracefully omitted if
-  blank.
+* HEADER: unlike tp183 (date/day-number below their labels), THIS
+  report uses "label, value a cell or two right, SAME row" for
+  everything, including "DU" (S1, date at U1) and "N°" (Y1, day
+  number at Z1) — the opposite convention from tp183 for those two
+  fields specifically, so don't assume "row below" carries over.
+* "Last Tubage 7\"" (K2) and "Top Liner 4\"1/2" (N2) are both bare
+  labels with NO adjacent depth value on this report instance — no
+  last_csg_shoe/last_lnr_top is fabricated from a size with nothing
+  next to it; only the raw size text is kept.
+* STALE LEFTOVER DATA: columns AE/AF (rows 12-16) contain a
+  "Tarification appareil TP 197" reference block — cost/tariff figures
+  for a COMPLETELY DIFFERENT RIG, apparently leftover from a shared
+  template — and columns AC/AD/AE/AF (rows 19-40) contain a dated
+  table running from 2017-06-28 to 2017-07-19, clearly a stale
+  artifact from a much older report cycle. Both blocks happen to
+  contain "T1"/"T2"/"T3"/"T4"-looking text, so the real TARIFICATION
+  search is bounded tightly to columns S-V (where the report's OWN
+  T1-T4 table actually lives, row 15) to avoid matching them.
+* TARIFICATION (O14 section header, T1-T4 at row 15, "Jour" row 16,
+  "Cumul" row 17).
+* ACTIVITIES (rows 18+): A=start, B=end, C=description (wide merge),
+  M=bill code, N=hours (Excel timedelta). Note: on the sample report
+  ALL SIX main-table activities are tagged bill code "T1" in column M,
+  while the "Jour" tarification row (S16:V16) shows T1=12.5h/T2=11.5h
+  — a genuine inconsistency in the SOURCE data (the daily summary
+  wasn't reconciled against the individual line-item tags). Both are
+  extracted faithfully as-is rather than one being silently "corrected"
+  to match the other. Consistent with the established fix (tp182/
+  tp183/tp187/entp204): a row only counts as a real operation if it
+  has an explicit bill code, which excludes the row-38 "total" check
+  row (M38='total', not a T-code) and the after-midnight continuation.
+* "Après minuit :" (C33) + continuation (C34) — captured separately as
+  `text_sections['after_midnight']`, not as an activity (no bill code).
+* A "NB:" remark line (C31) — captured as `header['remarks']`.
+* "Situation au rapport" (A39/D39) and "Programme prévu" (A40/D40) —
+  label, value a few cells right, same row.
+* "Représentant SH/DP" (W39, value BELOW at W40) — mapped onto
+  `supervisor`, the same way other reports map their site-rep field.
+* MUD CHECKS / mud volumes / PRODUITS (chemicals, W17 title) /
+  PERSONNEL (W31 title) all live in columns W-Z with the same
+  irregular label/value spacing as tp183 (some labels span W:X, some
+  W:Y) — read the same generic, span-aware way.
 
 Distinguishing markers (for helpers.parse_source._detect_format):
     - file extension .xlsx
     - contains "Rapport journalier de Work - Over" + "Appareil" + a rig
-      value matching "TP#127" / "TP-127" / "TP 127" (or generically
-      "AVANCEMENT" + "PARAMETRES" section headers together, or a
-      "DAD#" well prefix — this is the same template as the GW29
-      family used by other GW-series rigs)
+      value matching "TP 196" / "TP-196" (or generically "AVANCEMENT" +
+      "USURE" + "MATERIEL DE FOND" section headers together, or an
+      "OMJ" well prefix)
 """
 from __future__ import annotations
 import re
@@ -250,6 +233,8 @@ _MUD_LABEL_ALIASES = {
     "e stability": "electrical_stability",
     "solide (%)": "solids_pct",
     "oil/w/ratio": "oil_water_ratio",
+    "h/e": "oil_water_ratio",
+    "salinité": "salinity", "salinite": "salinity",
     "yield- p": "yield_pt", "yield p": "yield_pt",
     "gel 0/10": "gel_0_10",
     "plast vis": "pv",
@@ -264,7 +249,14 @@ _MUD_LABEL_ALIASES = {
 # ---------------------------------------------------------------------------
 # Main extractor
 # ---------------------------------------------------------------------------
-def parse_tp127(source: Union[Path, str, BytesIO]) -> dict:
+# ---------------------------------------------------------------------------
+# Main extractor
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Main extractor
+# ---------------------------------------------------------------------------
+def parse_tp196(source: Union[Path, str, BytesIO]) -> dict:
     wb = load_workbook(source, data_only=True)
     ws = wb.active
     L = _build_merged_lookup(ws)
@@ -273,31 +265,33 @@ def parse_tp127(source: Union[Path, str, BytesIO]) -> dict:
     header: Dict[str, Any] = {}
 
     # =====================================================================
-    # HEADER (rows 1-3)
+    # HEADER — "label, value a cell or two right, same row" throughout,
+    # including DU/N° (unlike tp183, which has those two below their
+    # labels — don't assume that convention carries over between reports).
     # =====================================================================
-    pos = _find_cell(ws, L, "DU", (1, 1), (15, 25))
+    pos = _find_cell(ws, L, "DU", (1, 1), (17, 24))
     if pos:
         v = _value_right(ws, L, pos[0], pos[1], max_scan=4, spans=S)
         d = _date_parse(v)
         if d: header["date"] = d
 
-    pos = _find_cell(ws, L, "N°", (1, 1), (20, 28))
+    pos = _find_cell(ws, L, "N°", (1, 1), (23, 28))
     if pos:
         v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
         if v is not None:
             header["day_number"] = _int(v)
 
-    pos = _find_cell(ws, L, "Puits", (1, 3), (1, 10))
+    pos = _find_cell(ws, L, "Puits", (1, 3), (1, 6))
     if pos:
         v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
         if v: header["well_name"] = _clean(str(v))
 
-    pos = _find_cell(ws, L, "Champ", (1, 3), (1, 12))
+    pos = _find_cell(ws, L, "Champ", (1, 3), (1, 10))
     if pos:
         v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
         if v: header["field_name"] = _clean(str(v))
 
-    pos = _find_cell(ws, L, "Appareil", (1, 3), (1, 15))
+    pos = _find_cell(ws, L, "Appareil", (1, 3), (1, 14))
     if pos:
         v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
         if v:
@@ -305,114 +299,77 @@ def parse_tp127(source: Union[Path, str, BytesIO]) -> dict:
             m = re.match(r"^([A-Z]+)\s*#?\s*-?\s*(\d+)$", rig)
             header["rig_name"] = f"{m.group(1)}-{m.group(2)}" if m else _clean(str(v))
 
-    # "Last Csg 7\"" — depth only, pipe size embedded in the label itself.
-    pos = None
-    for r in range(1, 4):
-        for c in range(1, 20):
-            v = _cell(ws, r, c, L)
-            if v and re.match(r"^last csg", _clean(str(v)), re.IGNORECASE):
-                pos = (r, c); break
-        if pos: break
-    if pos:
-        vraw = _clean(str(_cell(ws, *pos, L)))
-        m = re.search(r'(\d+"?[\d/\s]*)$', vraw)
-        size = m.group(1).strip() if m else ""
-        v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
-        depth = _float(v) if v is not None else None
-        if size and depth:
-            header["last_csg_size"] = size
-            header["last_csg_depth"] = depth
-            header["last_csg_shoe"] = f"{size} @ {depth:g}m"
+    # "Last Tubage 7\"" / "Top Liner 4\"1/2" — bare labels; on this
+    # report instance there's no adjacent depth value at all, so only
+    # the raw size text is kept (no fabricated last_csg_shoe/last_lnr_top
+    # from a size with nothing next to it).
+    for prefix, raw_key in ((["Last Tubage"], "last_csg_size_raw"),
+                             (["Top Liner"], "last_lnr_top_size_raw")):
+        pos = None
+        for r in range(1, 4):
+            for c in range(1, 22):
+                v = _cell(ws, r, c, L)
+                if v and _clean(str(v)).upper().startswith(prefix[0].upper()):
+                    pos = (r, c); break
+            if pos: break
+        if pos:
+            label_text = _clean(str(_cell(ws, *pos, L)))
+            header[raw_key] = label_text
+            v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
+            if v is not None and _is_value_like(v):
+                # A real depth WAS found next to the label — build the
+                # standardized field after all.
+                m = re.search(r'(\d+"?[\d/\s]*)$', label_text)
+                size = m.group(1).strip() if m else label_text
+                depth = _float(v)
+                if depth:
+                    dest = "last_csg" if "csg" in raw_key else "last_lnr_top"
+                    header[f"{dest}_size"] = size
+                    header[f"{dest}_depth"] = depth
+                    header[f"{dest}_shoe" if dest == "last_csg" else dest] = f"{size} @ {depth:g}m"
 
-    # "Top Liner 7''" — value like "3354m".
-    pos = None
-    for r in range(1, 4):
-        for c in range(1, 24):
-            v = _cell(ws, r, c, L)
-            if v and re.match(r"^top liner", _clean(str(v)), re.IGNORECASE):
-                pos = (r, c); break
-        if pos: break
-    if pos:
-        vraw = _clean(str(_cell(ws, *pos, L)))
-        m = re.search(r'(\d+"?[\d/\']*)$', vraw)
-        size = m.group(1).strip() if m else ""
-        v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
-        vs = _clean(str(v)) if v is not None else ""
-        dm = re.search(r"([\d.,]+)", vs)
-        depth = _float(dm.group(1)) if dm else None
-        if size and depth:
-            header["last_lnr_top_size"] = size
-            header["last_lnr_top_depth"] = depth
-            header["last_lnr_top"] = f"{size} @ {depth:g}m"
-
-    # "TD" — total depth (new field, no equivalent in sibling reports).
-    pos = _find_cell(ws, L, "TD", (1, 3), (15, 24))
-    if pos:
-        v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
-        vs = _clean(str(v)) if v is not None else ""
-        dm = re.search(r"([\d.,]+)", vs)
-        if dm: header["total_depth"] = _float(dm.group(1))
-
-    # Mud type ("Type" / "OBM", row 3, cols W-Y area)
-    pos = _find_cell(ws, L, "Type", (2, 4), (20, 26))
+    # Mud type
+    pos = _find_cell(ws, L, "Type", (2, 4), (22, 26))
     if pos:
         v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
         if v: header["mud_type"] = _clean(str(v))
 
-    # BHA composition (free text, kept as-is — not a structured field)
-    pos = _find_cell(ws, L, "BHA#1:", (10, 14), (1, 3))
+    # Situation au rapport / Programme prévu — label, value a few cells
+    # right, same row.
+    pos = _find_cell(ws, L, "Situation au rapport", (36, 42), (1, 4))
     if pos:
         v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
-        if v: header["bha_1"] = _clean(str(v))
-    pos = _find_cell(ws, L, "BHA#2", (10, 16), (1, 3))
+        if v: header["situation"] = _clean(str(v))
+    pos = _find_cell(ws, L, "Programme prévu", (36, 42), (1, 4))
     if pos:
         v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
-        if v: header["bha_2"] = _clean(str(v))
-
-    # Current drilling parameters (WOB/RPM/flow/pressure) — real per-day
-    # operational figures, distinct from the mud-checks panel.
-    params_hdr = _find_cell(ws, L, "PARAMETRES", (2, 4), (17, 24))
-    if params_hdr:
-        hdr_row = params_hdr[0] + 1  # "Poids"/"RPM"/"Débits"/"Pressions" row
-        val_row = None
-        for r in range(hdr_row + 1, hdr_row + 5):
-            if any(isinstance(_cell(ws, r, c, L), (int, float)) for c in range(19, 23)):
-                val_row = r; break
-        if val_row:
-            current_params = {}
-            for c, key in ((19, "wob"), (20, "rpm"), (21, "flow_rate"), (22, "pressure")):
-                v = _cell(ws, val_row, c, L)
-                if v is not None: current_params[key] = _float(v)
-            if current_params:
-                header["current_params"] = current_params
-
-    # Programme prévu — label + value a few cells to the right, same row.
-    pos = _find_cell(ws, L, "Programme prévu", (35, 48), (1, 5))
-    if pos:
-        v = _value_right(ws, L, pos[0], pos[1], max_scan=4, spans=S)
         if v: header["plan_operations"] = _clean(str(v))
 
-    # Représentant SH/DP + Véhicule — both blank on the sample report;
-    # read generically so they surface whenever they ARE filled in.
-    pos = _find_cell(ws, L, "Représentant SH/DP", (35, 45), (20, 26))
+    # "Représentant SH/DP" — value BELOW the label this time.
+    pos = _find_cell(ws, L, "Représentant SH/DP", (36, 42), (20, 26))
     if pos:
-        below = _cell(ws, pos[0] + 1, pos[1], L)
-        if below: header["site_representative"] = _clean(str(below))
-        if header.get("site_representative"):
+        v = _cell(ws, pos[0] + 1, pos[1], L)
+        if v:
+            header["site_representative"] = _clean(str(v))
             header["supervisor"] = header["site_representative"]
-    pos = _find_cell(ws, L, "Véhicule", (35, 45), (14, 20))
-    if pos:
-        type_pos = _find_cell(ws, L, "Type", (pos[0], pos[0] + 1), (14, 22))
-        if type_pos:
-            v = _cell(ws, type_pos[0] + 1, type_pos[1], L)
-            if v: header["vehicule"] = _clean(str(v))
+
+    # A "NB:"-prefixed remark line.
+    for r in range(28, 33):
+        v = ws.cell(r, 3).value
+        if v and _clean(str(v)).upper().startswith("NB"):
+            remark = re.sub(r"^NB\s*:?\s*", "", _clean(str(v)), flags=re.IGNORECASE)
+            if remark: header["remarks"] = remark
+            break
 
     # =====================================================================
-    # TARIFICATION — T1-T4 column headers, then Jour (daily) and Cumul rows.
+    # TARIFICATION — bounded tightly to columns S-V (18-22), where this
+    # report's OWN T1-T4 table lives, to avoid the stale "Tarification
+    # appareil TP 197" leftover block sitting in columns AE/AF (see
+    # module docstring) which also contains "T1"/"T2"/"T3"/"T4" text.
     # =====================================================================
     tarif_totals: Dict[str, float] = {}
     tarif_cumul: Dict[str, float] = {}
-    t1_pos = _find_cell(ws, L, "T1", (10, 20), (15, 24))
+    t1_pos = _find_cell(ws, L, "T1", (13, 18), (18, 22))
     if t1_pos:
         hdr_row, t1_col = t1_pos
         codes = []
@@ -423,7 +380,7 @@ def parse_tp127(source: Union[Path, str, BytesIO]) -> dict:
         jour_row = None
         cumul_row = None
         for r in range(hdr_row + 1, hdr_row + 4):
-            label = _clean(str(_cell(ws, r, 15, L) or ""))
+            label = _clean(str(ws.cell(r, 15).value or ""))  # col O
             if "JOUR" in label.upper(): jour_row = r
             if "CUMUL" in label.upper(): cumul_row = r
         for c, code in codes:
@@ -435,31 +392,24 @@ def parse_tp127(source: Union[Path, str, BytesIO]) -> dict:
                 if v is not None: tarif_cumul[code] = _float(v)
 
     # =====================================================================
-    # ACTIVITIES: A=start, B=end, C=description, M=bill code, N=hours.
-    # Only rows with an explicit bill code count as real operations (see
-    # module docstring) — this naturally excludes both the trailing blank
-    # placeholder rows in the main table AND the "AFTER MIDNIGHT" section
-    # further down, without needing to special-case that marker text.
+    # ACTIVITIES: A=start, B=end, C=description (wide merge), M=bill
+    # code, N=hours (Excel timedelta). Only rows with an explicit bill
+    # code count as real operations — see module docstring re: the
+    # T1-everywhere-in-column-M quirk on this report, and the row-38
+    # "total" check row (M38='total', not a real T-code) that this
+    # filter also correctly excludes.
     # =====================================================================
     activities: List[Dict[str, Any]] = []
-    for r in range(18, 40):
-        bill = _clean(_cell(ws, r, 13, L) or "")   # col M
-        if not bill:
+    for r in range(18, 38):
+        bill = _clean(ws.cell(r, 13).value or "")   # col M
+        if not bill or not re.match(r"^T\d$", bill):
             continue
-        start_v = ws.cell(r, 1).value
-        end_v   = ws.cell(r, 2).value
-        desc    = _clean(ws.cell(r, 3).value or "")
-        hrs_v   = _cell(ws, r, 14, L)               # col N
-
-        start_t = _time_from_cell(start_v)
-        end_t   = _time_from_cell(end_v)
+        desc = _clean(ws.cell(r, 3).value or "")     # col C
+        hrs_v = _cell(ws, r, 14, L)                   # col N
         hours = _hours_from_cell(hrs_v)
-        if not hours and start_t and end_t:
-            sm = start_t.hour * 60 + start_t.minute
-            em = end_t.hour * 60 + end_t.minute
-            if em == sm: hours = 24.0
-            elif em > sm: hours = (em - sm) / 60.0
-            else: hours = (em + 1440 - sm) / 60.0
+
+        start_t = _time_from_cell(ws.cell(r, 1).value)  # col A
+        end_t   = _time_from_cell(ws.cell(r, 2).value)  # col B
 
         activities.append({
             "start_time": start_t, "end_time": end_t, "hours": hours,
@@ -471,12 +421,36 @@ def parse_tp127(source: Union[Path, str, BytesIO]) -> dict:
         })
 
     # =====================================================================
-    # MUD CHECKS — sparse label/value pairs in cols W-Z, rows 6-16. Column
-    # spacing between a label and its value varies row to row (some
-    # labels span W:X, others W:Y), so scan generically: for every
-    # string-looking cell in the block, treat the nearest following
-    # VALUE-LIKE cell (see _is_value_like) as its value, skipping past
-    # the label's own merge span first.
+    # AFTER MIDNIGHT — supplementary description text, not an activity
+    # (no bill code of its own). Same convention as entp204/tp183.
+    # =====================================================================
+    text_sections: Dict[str, str] = {}
+    am_pos = None
+    for r in range(28, 38):
+        v = ws.cell(r, 3).value
+        if v and "MINUIT" in _clean(str(v)).upper():
+            am_pos = r; break
+    if am_pos:
+        parts = []
+        for r in range(am_pos, am_pos + 6):
+            v = ws.cell(r, 3).value
+            if not v: continue
+            vs = _clean(str(v))
+            if not vs: continue
+            if vs.upper().startswith("APR") and "MINUIT" in vs.upper():
+                vs = re.sub(r"^Apr[eè]s\s*minuit\s*:?\s*", "", vs, flags=re.IGNORECASE)
+            if vs and vs not in parts:
+                parts.append(vs)
+        if parts:
+            text_sections["after_midnight"] = " ".join(parts)
+
+    if header.get("situation"):
+        text_sections["current_operation"] = header["situation"]
+    if header.get("plan_operations"):
+        text_sections["plan_operations"] = header["plan_operations"]
+
+    # =====================================================================
+    # MUD CHECKS — generic span-aware label/value scan, columns W-Z.
     # =====================================================================
     mud_checks: Dict[str, Any] = {}
     if "mud_type" in header:
@@ -500,22 +474,16 @@ def parse_tp127(source: Union[Path, str, BytesIO]) -> dict:
             mud_checks[key] = _float(val) if re.match(r"^-?[\d.,]+$", vs) else vs
 
     # =====================================================================
-    # PRODUITS (mud chemical usage) — item name (merged W:X), used (Y),
-    # stock (Z). Header row has "Utilisés"/"Stock" but no "Produits"
-    # column-header text itself (section title "PRODUITS" sits a couple
-    # rows above) — scanned generically over the block bounded by the
-    # "PRODUITS" section title and the "PERSONNEL" section title.
+    # PRODUITS (chemicals) — item (col W, sometimes merged W:X), used
+    # (col Y), stock (col Z). Bounded from the "PRODUITS" title down to
+    # the "PERSONNEL" title.
     # =====================================================================
     chemicals: List[Dict[str, Any]] = []
-    prod_title = _find_cell(ws, L, "PRODUITS", (14, 20), (22, 26))
-    pers_title_pos = None
-    for r in range(28, 40):
-        v = _cell(ws, r, 23, L)
-        if v and "PERSONNEL" in _clean(str(v)).upper():
-            pers_title_pos = r; break
-    ceiling = pers_title_pos if pers_title_pos else 34
-    if prod_title:
-        for r in range(prod_title[0] + 1, ceiling):
+    prod_pos = _find_cell(ws, L, "PRODUITS", (16, 18), (22, 27))
+    pers_pos = _find_cell(ws, L, "PERSONNEL", (29, 33), (22, 27))
+    ceiling = pers_pos[0] if pers_pos else 31
+    if prod_pos:
+        for r in range(prod_pos[0] + 1, ceiling):
             item = _cell(ws, r, 23, L)  # col W
             if not item or not isinstance(item, str): continue
             item_s = _clean(item)
@@ -529,28 +497,25 @@ def parse_tp127(source: Union[Path, str, BytesIO]) -> dict:
             })
 
     # =====================================================================
-    # PERSONNEL — label (merged W:Y) + count (Z), from the "PERSONNEL"
-    # section title down to the next section boundary.
+    # PERSONNEL — label (col W, merged W:Y) + count (col Z).
     # =====================================================================
     personnel: List[Dict[str, Any]] = []
-    if pers_title_pos:
-        for r in range(pers_title_pos + 1, pers_title_pos + 8):
-            label = _cell(ws, r, 23, L)
+    if pers_pos:
+        for r in range(pers_pos[0] + 1, pers_pos[0] + 8):
+            label = _cell(ws, r, 23, L)  # col W
             if not label or not isinstance(label, str): continue
             label_s = _clean(label)
             if not label_s: continue
             v = _cell(ws, r, 26, L)  # col Z
-            if v is None: continue
-            personnel.append({"company": label_s, "number": _int(v), "hours": "", "names": ""})
+            n = _int(v) if (v is not None and _is_value_like(v)) else 0
+            personnel.append({"company": label_s, "number": n, "hours": "", "names": ""})
 
     wb.close()
 
     return {
         "header": header,
         "activities": activities,
-        "text_sections": {
-            "plan_operations": header.get("plan_operations", ""),
-        },
+        "text_sections": text_sections,
         "mud_checks": mud_checks,
         "mud_volume": {},
         "mud_chemical_usage": chemicals,
@@ -563,17 +528,16 @@ def parse_tp127(source: Union[Path, str, BytesIO]) -> dict:
         "tarif_cumul": tarif_cumul,
     }
 
-
 # Drop-in compat
-parse_daily_excel_report = parse_tp127
-parse_gw29 = parse_tp127
+parse_daily_excel_report = parse_tp196
+parse_gw29 = parse_tp196
 
 
 if __name__ == "__main__":
     import sys, json
     if len(sys.argv) < 2:
-        sys.exit("Usage: tp127_extract.py SOURCE.xlsx")
-    data = parse_tp127(Path(sys.argv[1]))
+        sys.exit("Usage: tp196_extract.py SOURCE.xlsx")
+    data = parse_tp196(Path(sys.argv[1]))
 
     def default(o):
         if isinstance(o, (date_type, datetime)): return o.isoformat()

@@ -1,82 +1,130 @@
 #!/usr/bin/env python3
 """
-tp183_extract.py — extract a TP-183 (ENTP rig 183, TMLS wells) Daily
-Workover Report into the standard dict shape.
+tp183_extract.py — extract a TP-183 (rig) / MD-19 (well) / HMD (field)
+Daily Work-Over Report from a native .xlsx into the standard dict shape.
 
 Source layout
 -------------
-Compact single-sheet French template (~62 rows × 19 cols).  Title at D1:
-"RAPPORT JOURNALIER WORK OVER" (no "DE", different from TP-179/TP-173/ENF#04).
+Modern .xlsx, single sheet named like "DWR 07-TP-183 MD-19". Title at
+J3: "Rapport journalier work-over". A dense single-sheet French
+drilling/workover report, structurally similar in spirit to
+tp127_extract.py's GW29-family layout (granular AVANCEMENT/OUTILS/
+PARAMETRES/USURES engineering sections, BHA composition, deviation
+surveys) but with its own distinct column layout.
 
-Header (rows 3-4):
-  A3=PUITS    A4=well name (TMLS 6)
-  C3=APPAREIL C4=rig name  (TP 183)
-  D3=Dernier Tubage  D4=CSG description (7" P110 N.VAM...)
-                     E4=CSG depth (2790)
-  H3=Liner 4"1/2 (label only on this template)
-  J3=Fond label   J4=TD value (3080)
-  K3=TYPE BOUE    M3=mud type (OBM)
+Known layout notes
+-------------------
+* HEADER: "La date" (Y3, value at Y4 — row BELOW, same column) and
+  "WO N" (AB3, value at AB4 — also row below) follow the tp219-style
+  "label above, value below" convention; everything else ("Puits",
+  "Champ", "Appareil", "Dernier Tubage") is "label, value a cell or
+  two to the right, same row" like tp127.
+* "Dernier Tubage" (M6) gives only a pipe SIZE (" 7''"), no depth in
+  the same cell — there's no matching depth field on this report
+  instance, so last_csg_shoe is only set when the source actually has
+  something numeric alongside it (it doesn't here — no fabricated
+  depth is attached to a bare size).
+* TARIFICATION (T24 section header) hours are the DAILY row (T26
+  "Jour", values at V26:Y26 for T1-T4) — there's no separate
+  cumulative row on this template.
+* ACTIVITIES (rows 28+): the description (E, wide merge), bill code
+  (R), and hours (S) columns are reliable; the start/end time columns
+  (A/B and C/D) use THREE different, inconsistent encodings across
+  rows on the same report (plain integers, text "00:00", and
+  Excel timedeltas used as "seconds since midnight") — since the S
+  column already gives pre-computed hours directly, hours come from
+  S and start/end times are read best-effort from C/D for display
+  only, never relied on for the hours figure itself.
+  Consistent with the established fix (tp182/tp187/entp204): a row
+  only counts as a real operation if it has an explicit bill code
+  (column R). This report has an "Apres minuit:" (after midnight)
+  marker (E40) followed by a continuation-description row with NO
+  bill code of its own — excluded from activities by the same filter,
+  and instead captured separately as `text_sections['after_midnight']`
+  (same convention as entp204_extract.py). A further row (E45) is a
+  "Remarque:" (remark) note, not an activity or after-midnight
+  continuation — captured separately as `header['remarks']`.
+* MUD CHECKS (Z15:AB24 area) are simple unmerged label/value pairs —
+  read generically (immediate next cell as value, if value-like).
+* PRODUITS (chemicals, Z27 header — item merged 2 cols, used at col
+  AB, stock at col AC) and PERSONNEL (Z43+, role labels with counts —
+  all blank on the sample report) are both read generically the same
+  way as the mud-checks scan.
+* "Situation @ 06:00" (C60/F60) and "Programme prévu" (C61/F61) are
+  both "label, value a few cells right, same row".
 
-Tarif totals at row 7 (F=T1, H=T2, I=T3, J=T4 — note gap at col G):
-  F7=21  H7=3  I7=0  J7=  (E7=H/Jour label)
-Daily cost at E11; cumul cost in nearby H-K columns.
-
-Mud panel at K9-L10 (density, viscosity).
-Volumes at N7/N8 (Vol puits / Vol surf).
-
-Activities at rows 10-12: A=start, B=end, C=description.  Some time values
-are str ("00:00", "24h00") rather than datetime.time — need to handle.
-
-Cost breakdown E13-26: E=company label, I=montant DA.
-
-Chemicals K17-32: K=item, L=units, M=used, N=stock.
-
-Personnel E28-34: E=role label, J=count.
-
-Situation A37, Programme A38.
-
-Supervisors K37 + M37 — TWO names (Rep maître œuvre + Resp sce puits) →
-both go to supervisor + superintendent per the two-supervisor convention.
-
-Distinguishing marker (from other "RAPPORT JOURNALIER" templates):
-    - title "RAPPORT JOURNALIER WORK OVER" (no "DE")
-    - "TP 183" or "TP-183" anywhere in the markers
-    - well "TMLS" prefix
+Distinguishing markers (for helpers.parse_source._detect_format):
+    - file extension .xlsx
+    - contains "Rapport journalier work-over" + "Appareil" + a rig
+      value matching "TP-183" / "TP183" (or generically "AVANCEMENTS"
+      + "USURES" + "MATERIELS DE FOND" section headers together, or an
+      "MD-" well prefix)
 """
 from __future__ import annotations
 import re
 from datetime import datetime, time, date as date_type, timedelta
 from io import BytesIO
 from pathlib import Path
-from typing import Union, List
+from typing import Any, Dict, List, Optional, Union
 
 from openpyxl import load_workbook
 
 
 # ---------------------------------------------------------------------------
-# Helpers (same shape as the other extractors)
+# Helpers
 # ---------------------------------------------------------------------------
 def _clean(v) -> str:
     if v is None: return ""
-    s = str(v)
-    # Strip Excel error tokens — these come from broken cross-sheet formulas
-    if s.strip() in ("#VALUE!", "#REF!", "#NAME?", "#N/A", "#DIV/0!", "#NULL!"):
-        return ""
-    return re.sub(r"\s+", " ", s).strip()
+    return re.sub(r"\s+", " ", str(v)).strip()
 
 
-def _float(v, default=0.0) -> float:
+def _float(v, default: float = 0.0) -> float:
     if v is None: return default
+    if isinstance(v, bool): return float(v)
     if isinstance(v, (int, float)): return float(v)
     s = _clean(v).replace(",", ".").replace(" ", "")
-    if s in ("", "-", "/", "None"): return default
-    s = re.sub(r"[a-zA-Zé°%/³]+$", "", s).strip()
-    try: return float(s)
-    except ValueError: return default
+    if not s or s in ("-", "/", "None"): return default
+    stripped = re.sub(r"[a-zA-Zé°%/³]+$", "", s).strip()
+    try: return float(stripped)
+    except ValueError: pass
+    m = re.match(r"^-?\d+(?:\.\d+)?", s)
+    if m:
+        try: return float(m.group(0))
+        except ValueError: pass
+    return default
 
 
-def _int(v, default=0) -> int:
+def _int(v, default: int = 0) -> int:
     return int(_float(v, float(default)))
+
+
+def _time_from_cell(v) -> Optional[time]:
+    if v is None: return None
+    if isinstance(v, time): return v
+    if isinstance(v, datetime): return v.time()
+    if isinstance(v, timedelta):
+        total = int(v.total_seconds())
+        if total >= 86400: return time(0, 0)
+        return time((total // 3600) % 24, (total % 3600) // 60)
+    s = _clean(v)
+    if not s or s in ("-", "None"): return None
+    if s in ("24:00", "24:00:00"): return time(0, 0)
+    for fmt in ("%H:%M:%S", "%H:%M", "%Hh%M"):
+        try: return datetime.strptime(s, fmt).time()
+        except ValueError: continue
+    return None
+
+
+def _hours_from_cell(v) -> float:
+    """Read an Excel duration cell — these use the TIME data type to mean
+    a duration (e.g. time(11, 0) == "11 hours", NOT 11 AM), the same
+    convention used for H/Jour-style hour cells in the sibling extractors."""
+    if v is None: return 0.0
+    if isinstance(v, (int, float)): return float(v)
+    if isinstance(v, timedelta): return v.total_seconds() / 3600.0
+    if isinstance(v, time): return v.hour + v.minute / 60.0
+    if isinstance(v, datetime): return v.hour + v.minute / 60.0
+    return _float(v)
 
 
 def _date_parse(v):
@@ -84,52 +132,20 @@ def _date_parse(v):
     if isinstance(v, datetime): return v.date()
     if isinstance(v, date_type): return v
     s = _clean(v)
-    if not s or s in ("-", "/", "--", "//"): return None
-    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d-%m-%y"):
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y"):
         try: return datetime.strptime(s, fmt).date()
         except ValueError: continue
-    return None
-
-
-def _time_parse(v):
-    """Parse a time value.  Handles datetime.time, str '24h00' / '00:00',
-    and Excel-epoch datetime (1900-01-01 means 24:00)."""
-    if v is None: return None
-    if isinstance(v, time): return v
-    if isinstance(v, datetime):
-        if v.year == 1900 and v.month == 1 and v.day == 1:
-            return v.time()
-        return v.time()
-    if isinstance(v, timedelta):
-        total = int(v.total_seconds())
-        if total == 86400: return time(0, 0)
-        return time((total // 3600) % 24, (total % 3600) // 60)
-    s = _clean(v)
-    if not s or s in ("-", "None"): return None
-    if s in ("24:00", "24:00:00", "24h00", "24H00", "24h"): return time(0, 0)
-    # Handle "13h30" / "13H30" style
-    m = re.match(r"^(\d{1,2})[hH](\d{0,2})$", s)
+    m = re.search(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b", s)
     if m:
-        return time(int(m.group(1)) % 24, int(m.group(2) or 0))
-    for fmt in ("%H:%M:%S", "%H:%M", "%Hh%M"):
-        try: return datetime.strptime(s, fmt).time()
-        except ValueError: continue
+        d, mo, y = (int(x) for x in m.groups())
+        if y < 100: y += 2000
+        try: return date_type(y, mo, d)
+        except ValueError: return None
     return None
-
-
-def _duration_hours(v) -> float:
-    if v is None: return 0.0
-    if isinstance(v, (int, float)): return float(v)
-    if isinstance(v, timedelta): return v.total_seconds() / 3600.0
-    if isinstance(v, time):     return v.hour + v.minute / 60.0
-    if isinstance(v, datetime):
-        if v.year == 1900 and v.month == 1 and v.day == 1:
-            return v.hour + v.minute / 60.0
-        return 0.0
-    return _float(v)
 
 
 def _build_merged_lookup(ws):
+    """Value lookup for non-top-left cells of a merged range."""
     lookup = {}
     for mr in ws.merged_cells.ranges:
         av = ws.cell(mr.min_row, mr.min_col).value
@@ -140,340 +156,375 @@ def _build_merged_lookup(ws):
     return lookup
 
 
+def _build_span_end_cols(ws):
+    """For every cell inside a merged range, the range's rightmost column
+    — used so a label/value scan can skip past the LABEL's own merge span
+    (e.g. 'Perte TRIPING' merged W6:Y6, value at Z6) instead of re-reading
+    the label's own text back via the merged-cell lookup and mistaking it
+    for a value."""
+    spans = {}
+    for mr in ws.merged_cells.ranges:
+        for r in range(mr.min_row, mr.max_row + 1):
+            for c in range(mr.min_col, mr.max_col + 1):
+                spans[(r, c)] = mr.max_col
+    return spans
+
+
 def _cell(ws, r, c, lookup):
     v = ws.cell(r, c).value
     return v if v is not None else lookup.get((r, c))
 
 
-def _strip_label(text: str, *labels: str) -> str:
-    """Strip a known label prefix from a string.  Used for cells like
-    'BUT  DU  WORK  OVER : \\n Reprise technique...' where label+value share
-    a cell."""
-    s = _clean(text)
-    for lab in labels:
-        rx = rf"^\s*{re.escape(lab)}\s*:?\s*"
-        new = re.sub(rx, "", s, flags=re.IGNORECASE)
-        if new != s:
-            return new.strip()
-    return s
+def _find_cell(ws, lookup, target, row_range, col_range):
+    """(row, col) of the first cell whose text EQUALS target
+    (case-insensitive, whitespace-normalized, colon-stripped)."""
+    t = _clean(target).upper().rstrip(":").strip()
+    for r in range(row_range[0], row_range[1] + 1):
+        for c in range(col_range[0], col_range[1] + 1):
+            v = _cell(ws, r, c, lookup)
+            if v is None: continue
+            if _clean(str(v)).upper().rstrip(":").strip() == t:
+                return (r, c)
+    return None
 
 
-def _normalize_rig(name: str) -> str:
-    """'TP 183' / 'TP-183' / 'TP183' → 'TP-183' (canonical form)."""
-    s = _clean(name).upper()
-    m = re.search(r"TP[-\s]*(\d+)", s)
-    if m: return f"TP-{m.group(1)}"
-    return _clean(name)
+def _value_right(ws, lookup, row, after_col, max_scan=6, spans=None):
+    """Nearest non-empty cell to the right of (row, after_col) — skipping
+    past the label's OWN merge span first if `spans` is given."""
+    start = after_col
+    if spans is not None:
+        start = spans.get((row, after_col), after_col)
+    for c in range(start + 1, start + 1 + max_scan):
+        v = _cell(ws, row, c, lookup)
+        if v is None or _clean(str(v)) == "":
+            continue
+        return v
+    return None
+
+
+def _is_value_like(v) -> bool:
+    """True if a cell looks like a real DATA value (number, date/time, or
+    a short numeric-ish string like '90/10' or '10/17') rather than
+    another label — used when scanning a row for label/value pairs with
+    irregular spacing, so a label immediately followed by ANOTHER label
+    (no value in between) isn't mistaken for having one."""
+    if v is None: return False
+    if isinstance(v, (int, float, datetime, date_type, time, timedelta)):
+        return True
+    s = _clean(v)
+    return bool(re.match(r"^[\d.,/\-\s]+$", s)) and s != ""
+
+
+def _slug(label: str) -> str:
+    s = _clean(label).lower()
+    s = re.sub(r"[^\w]+", "_", s)
+    return re.sub(r"_+", "_", s).strip("_")
+
+
+_MUD_LABEL_ALIASES = {
+    "densité": "density", "densite": "density",
+    "v. marsh": "fun_vis", "v marsh": "fun_vis",
+    "filtrat": "filtrat",
+    "e stability": "electrical_stability",
+    "solide (%)": "solids_pct",
+    "oil/w/ratio": "oil_water_ratio",
+    "yield- p": "yield_pt", "yield p": "yield_pt",
+    "gel 0/10": "gel_0_10",
+    "plast vis": "pv",
+    "ph": "ph",
+    "perte triping": "tripping_loss",
+    "transfert": "transfert_vol",
+    "volume puits (m3) d": "string_volume",
+    "totale surface (m3)": "pits_volume",
+}
 
 
 # ---------------------------------------------------------------------------
 # Main extractor
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Main extractor
+# ---------------------------------------------------------------------------
 def parse_tp183(source: Union[Path, str, BytesIO]) -> dict:
-    if isinstance(source, (str, Path)):
-        wb = load_workbook(source, data_only=True)
-    else:
-        wb = load_workbook(source, data_only=True)
+    wb = load_workbook(source, data_only=True)
     ws = wb.active
     L = _build_merged_lookup(ws)
+    S = _build_span_end_cols(ws)
+
+    header: Dict[str, Any] = {}
 
     # =====================================================================
-    # HEADER (rows 3-4)
+    # HEADER
     # =====================================================================
-    header = {}
-
-    # Well  — A4
-    header["well_name"]  = _clean(_cell(ws, 4, 1, L))
-    # Rig   — C4
-    header["rig_name"]   = _normalize_rig(_cell(ws, 4, 3, L) or "")
-    # CSG (Dernier Tubage) — D4 description + E4 depth
-    csg_desc = _clean(_cell(ws, 4, 4, L) or "")
-    csg_depth = _cell(ws, 4, 5, L)
-    if csg_desc or csg_depth is not None:
-        if csg_depth is not None:
-            try:
-                d = int(float(str(csg_depth)))
-                header["top_shoe"] = f"{csg_desc} @ {d}m" if csg_desc else f"@ {d}m"
-            except (ValueError, TypeError):
-                header["top_shoe"] = f"{csg_desc} @ {_clean(csg_depth)}".strip()
-        else:
-            header["top_shoe"] = csg_desc
-
-    # Liner top — H3 ("Liner 4\"1/2" label).  This template doesn't always
-    # carry the liner depth; if present, it's in J4 next to the FOND label.
-    # We keep just the size string when no depth is given.
-    liner = _clean(_cell(ws, 3, 8, L) or "")
-    if liner and "LINER" in liner.upper():
-        size = re.sub(r"^\s*LINER\s+", "", liner, flags=re.IGNORECASE).strip()
-        if size:
-            header["last_csg_top"] = size
-
-    # Total Depth (FOND) — J4
-    fond = _cell(ws, 4, 10, L)
-    if fond is not None:
-        header["well_md"] = _float(fond)
-
-    # Mud type — M3
-    mud_type = _clean(_cell(ws, 3, 13, L) or "")
-
-    # Date — K2 (label "JOURNEE DU" sits at K1).  In live deployments
-    # this cell holds a resolved date like 2026-05-10.  In standalone
-    # uploads where the cross-sheet formula breaks it resolves to
-    # "#VALUE!" — _clean / _date_parse both treat that as None, so we
-    # gracefully skip and let to_router_excel.py fall back to the
-    # filename / --date override.
-    date_raw = _cell(ws, 2, 11, L)                # K2
-    d = _date_parse(date_raw)
-    if d:
-        header["date"] = d
-
-    # Day number — read from the SHEET NAME ("RAP N°46").  Earlier I
-    # tried K2 for this, but K2 actually holds the date, not the day
-    # number — the day number lives in the sheet title.
-    sheet_match = re.search(r"N\s*[°o]\s*(\d+)", ws.title or "", re.IGNORECASE)
-    if sheet_match:
-        header["day_number"] = int(sheet_match.group(1))
-
-    # Objective — A5/A6 (label+value share the cell)
-    obj_raw = _cell(ws, 6, 1, L) or _cell(ws, 5, 1, L)
-    if obj_raw:
-        header["well_objective"] = _strip_label(str(obj_raw), "BUT DU WORK OVER",
-                                                "BUT  DU  WORK  OVER")
-
-    # =====================================================================
-    # TARIF TOTALS (row 7: F=T1, H=T2, I=T3, J=T4 — note gap at col G)
-    # Row 8: H/Cum gives cumulative — we capture both
-    # =====================================================================
-    tarif_totals = {}
-    for code, col in [("t1", 6), ("t2", 8), ("t3", 9), ("t4", 10)]:
-        v = _cell(ws, 7, col, L)
+    # "La date" / "WO N" — label above, value directly BELOW (same col).
+    pos = _find_cell(ws, L, "La date", (1, 5), (20, 30))
+    if pos:
+        v = _cell(ws, pos[0] + 1, pos[1], L)
+        d = _date_parse(v)
+        if d: header["date"] = d
+    pos = _find_cell(ws, L, "WO N", (1, 5), (25, 32))
+    if pos:
+        v = _cell(ws, pos[0] + 1, pos[1], L)
         if v is not None:
-            try:
-                hrs = _float(v)
-                if hrs > 0:
-                    tarif_totals[code] = hrs
-            except Exception:
-                pass
+            m = re.search(r"\d+", _clean(str(v)))
+            if m: header["day_number"] = int(m.group(0))
+
+    # "Puits" / "Champ" / "Appareil" — label, value a cell or two right,
+    # same row.
+    pos = _find_cell(ws, L, "Puits", (5, 8), (1, 6))
+    if pos:
+        v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
+        if v: header["well_name"] = _clean(str(v))
+    pos = _find_cell(ws, L, "Champ", (5, 8), (1, 10))
+    if pos:
+        v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
+        if v: header["field_name"] = _clean(str(v))
+    pos = _find_cell(ws, L, "Appareil", (5, 8), (1, 14))
+    if pos:
+        v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
+        if v:
+            rig = _clean(str(v)).upper()
+            m = re.match(r"^([A-Z]+)\s*#?\s*-?\s*(\d+)$", rig)
+            header["rig_name"] = f"{m.group(1)}-{m.group(2)}" if m else _clean(str(v))
+
+    # "Dernier Tubage" — this report instance gives only a pipe SIZE
+    # (" 7''"), no depth in the same cell or the next one over. No
+    # last_csg_shoe is fabricated from a bare size with no matching depth.
+    pos = _find_cell(ws, L, "Dernier Tubage", (5, 8), (10, 16))
+    if pos:
+        v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
+        if v:
+            size = _clean(str(v))
+            header["last_csg_size"] = size
+            dm = re.search(r"([\d.,]+)", size)
+            # Only a bare size like " 7''" here — no digits at all besides
+            # the pipe fraction, so this deliberately does NOT become a
+            # depth (re.search below would wrongly grab "7" as a depth).
+            # Kept only as the raw size field.
+
+    # Mud type ("Type" label, value in the next merged cell)
+    pos = _find_cell(ws, L, "Type", (5, 8), (24, 28))
+    if pos:
+        v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
+        if v: header["mud_type"] = _clean(str(v))
+
+    # Current bit/drilling parameters (AVANCEMENT/OUTILS/PARAMETRES block)
+    # — the day's real operational figures, captured as a flat dict.
+    current_params = {}
+    for r in range(9, 13):
+        row_vals = {}
+        for c, key in ((4, "outil_no"), (5, "profondeur"), (6, "avance"),
+                       (12, "debit"), (13, "pression"), (14, "rpm"),
+                       (15, "poids"), (16, "rob")):
+            v = _cell(ws, r, c, L)
+            if isinstance(v, (int, float)):
+                row_vals[key] = float(v)
+        if row_vals:
+            current_params.update(row_vals)
+    if current_params:
+        header["current_params"] = current_params
+
+    # Situation @ HH:MM / Programme prévu — label, value a few cells
+    # right, same row.
+    pos = None
+    for r in range(58, 65):
+        for c in range(1, 6):
+            v = _cell(ws, r, c, L)
+            if v and _clean(str(v)).upper().startswith("SITUATION"):
+                pos = (r, c); break
+        if pos: break
+    if pos:
+        v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
+        if v: header["situation"] = _clean(str(v))
+    pos = None
+    for r in range(58, 65):
+        for c in range(1, 6):
+            v = _cell(ws, r, c, L)
+            if v and "PROGRAMME" in _clean(str(v)).upper():
+                pos = (r, c); break
+        if pos: break
+    if pos:
+        v = _value_right(ws, L, pos[0], pos[1], max_scan=3, spans=S)
+        if v: header["plan_operations"] = _clean(str(v))
 
     # =====================================================================
-    # COSTS — daily at E11 (after the JOURNALIER label at E10),
-    # cumul cost in H11 (after CUMULE label at H10)
+    # TARIFICATION — T1-T4 header row, then the "Jour" (daily) hours row
+    # right below it (no separate cumulative row on this template).
     # =====================================================================
-    daily_cost = _cell(ws, 11, 5, L)
-    if daily_cost is not None:
-        try:
-            v = _float(daily_cost)
-            if v > 0: header["daily_cost"] = int(v)
-        except Exception:
-            pass
-    cum_cost = _cell(ws, 11, 8, L)
-    if cum_cost is not None:
-        try:
-            v = _float(cum_cost)
-            if v > 0: header["cum_cost"] = int(v)
-        except Exception:
-            pass
+    tarif_totals: Dict[str, float] = {}
+    t1_pos = _find_cell(ws, L, "T1", (20, 28), (18, 26))
+    if t1_pos:
+        hdr_row, t1_col = t1_pos
+        codes = []
+        for c in range(t1_col, t1_col + 4):
+            v = _cell(ws, hdr_row, c, L)
+            if isinstance(v, str) and re.match(r"^T\d$", _clean(v)):
+                codes.append((c, _clean(v).lower()))
+        jour_row = None
+        for r in range(hdr_row + 1, hdr_row + 3):
+            label = _clean(str(_cell(ws, r, 20, L) or ""))
+            if "JOUR" in label.upper(): jour_row = r; break
+        if jour_row is not None:
+            for c, code in codes:
+                v = _cell(ws, jour_row, c, L)
+                if v is not None: tarif_totals[code] = _float(v)
 
     # =====================================================================
-    # OPERATIONS  (rows 10-12 by default; scan a few more rows to be safe.
-    # Stop at any row that contains a non-time string in col A and is
-    # clearly a section header.)
+    # ACTIVITIES: E=description (wide merge), R=bill code, S=hours
+    # (pre-computed by the source spreadsheet). A/B and C/D start/end-time
+    # columns use inconsistent encodings across rows on this report (plain
+    # integers, text "00:00", Excel timedeltas as seconds-since-midnight),
+    # so hours always come from S — never recomputed from a start/end
+    # difference — and C/D are read best-effort for display only. Only
+    # rows with an explicit bill code count as real operations (see
+    # module docstring), which excludes the "Apres minuit" continuation.
     # =====================================================================
-    activities = []
-    OPS_START = 10
-    OPS_END = 30      # generous upper bound
-    for row in range(OPS_START, OPS_END):
-        start = _cell(ws, row, 1, L)
-        end   = _cell(ws, row, 2, L)
-        desc  = _clean(_cell(ws, row, 3, L) or "")
+    activities: List[Dict[str, Any]] = []
+    for r in range(28, 45):
+        bill = _clean(_cell(ws, r, 18, L) or "")   # col R
+        if not bill:
+            continue
+        desc = _clean(ws.cell(r, 5).value or "")   # col E
+        hrs_v = _cell(ws, r, 19, L)                 # col S
+        hours = _float(hrs_v)
 
-        # Stop markers — these appear in col A when the ops block ends
-        a_text = _clean(_cell(ws, row, 1, L) or "").upper()
-        if any(m in a_text for m in (
-                "SITUATION", "PROGRAMME", "BUT DU WORK",
-                "ANALYSE DES TEMPS", "TOTAL",
-        )) and not _time_parse(start):
+        start_t = _time_from_cell(ws.cell(r, 3).value)  # col C
+        end_t   = _time_from_cell(ws.cell(r, 4).value)  # col D
+
+        activities.append({
+            "start_time": start_t, "end_time": end_t, "hours": hours,
+            "phase_name": "", "code": "", "sub": "",
+            "description": desc,
+            "start_md": 0, "end_md": 0,
+            "npt": 0, "npt_detail": "", "npt_company": "", "op_company": "",
+            "bill": bill,
+        })
+
+    # =====================================================================
+    # AFTER MIDNIGHT / REMARKS — supplementary description text, not
+    # activities (no bill code of their own). Captured separately, same
+    # convention as entp204_extract.py's after_midnight_summary.
+    # =====================================================================
+    text_sections: Dict[str, str] = {}
+    am_pos = None
+    for r in range(28, 45):
+        v = ws.cell(r, 5).value
+        if v and "APRES MINUIT" in _clean(str(v)).upper():
+            am_pos = r; break
+    if am_pos:
+        parts = []
+        for r in range(am_pos, am_pos + 6):
+            v = ws.cell(r, 5).value
+            if not v: continue
+            vs = _clean(str(v))
+            if not vs: continue
+            if vs.upper().startswith("APRES MINUIT"):
+                vs = re.sub(r"^APRES\s*MINUIT\s*:?\s*", "", vs, flags=re.IGNORECASE)
+            if vs.upper().startswith("REMARQUE"):
+                # A "Remarque:" line is a distinct note, not part of the
+                # after-midnight continuation — captured separately below.
+                continue
+            if vs and vs not in parts:
+                parts.append(vs)
+        if parts:
+            text_sections["after_midnight"] = " ".join(parts)
+
+    for r in range(28, 50):
+        v = ws.cell(r, 5).value
+        if v and _clean(str(v)).upper().startswith("REMARQUE"):
+            remark = re.sub(r"^REMARQUE\s*:?\s*", "", _clean(str(v)), flags=re.IGNORECASE)
+            if remark: header["remarks"] = remark
             break
 
-        # Skip empty rows
-        if start is None and end is None and not desc:
-            continue
+    if header.get("situation"):
+        text_sections["current_operation"] = header["situation"]
+    if header.get("plan_operations"):
+        text_sections["plan_operations"] = header["plan_operations"]
 
-        start_t = _time_parse(start)
-        end_t   = _time_parse(end)
+    # =====================================================================
+    # MUD CHECKS — simple unmerged label/value pairs (immediate next cell
+    # as value, if it looks like real data rather than another label).
+    # =====================================================================
+    mud_checks: Dict[str, Any] = {}
+    if "mud_type" in header:
+        mud_checks["mud_type"] = header["mud_type"]
+    for r in range(15, 25):
+        for lab_c in (26, 28):   # col Z, col AB
+            v = _cell(ws, r, lab_c, L)
+            if v is None or not isinstance(v, str) or not _clean(v):
+                continue
+            label = _clean(v)
+            norm = label.lower().rstrip(":").strip()
+            val = _value_right(ws, L, r, lab_c, max_scan=2, spans=S)
+            if val is None or not _is_value_like(val):
+                continue
+            key = _MUD_LABEL_ALIASES.get(norm, _slug(label))
+            if not key or key in mud_checks: continue
+            vs = _clean(str(val))
+            mud_checks[key] = _float(val) if re.match(r"^-?[\d.,]+$", vs) else vs
 
-        if start_t is not None:
-            # Compute hours from times — these are the source of truth
-            hours = 0.0
-            if start_t and end_t:
-                sm = start_t.hour * 60 + start_t.minute
-                em = end_t.hour * 60 + end_t.minute
-                if em == sm:    hours = 24.0
-                elif em > sm:   hours = (em - sm) / 60.0
-                else:           hours = (em + 1440 - sm) / 60.0
-
-            activities.append({
-                "start_time": start_t,
-                "end_time":   end_t,
-                "hours":      hours,
-                "phase_name": "",
-                "code": "", "sub": "",
-                "description": desc,
-                "start_md": 0, "end_md": 0,
-                "npt": 0, "npt_detail": "",
-                "npt_company": "", "op_company": "",
-                "bill": "",        # this template has no per-op bill code
+    # =====================================================================
+    # PRODUITS (chemicals) — item (col Z, sometimes merged 2 cols), used
+    # (col AB), stock (col AC). Bounded from the "Produits" section header
+    # down to the "TOTAL" row.
+    # =====================================================================
+    chemicals: List[Dict[str, Any]] = []
+    prod_pos = None
+    for r in range(24, 30):
+        for c in range(26, 32):
+            v = _cell(ws, r, c, L)
+            if v and _clean(str(v)).upper().startswith("UTILISE"):
+                prod_pos = (r, 26); break
+        if prod_pos: break
+    if prod_pos:
+        for r in range(prod_pos[0] + 1, prod_pos[0] + 20):
+            item = _cell(ws, r, 26, L)  # col Z
+            if not item or not isinstance(item, str): continue
+            item_s = _clean(item)
+            if not item_s: continue
+            if item_s.upper().startswith("TOTAL"): break
+            used  = _cell(ws, r, 28, L)   # col AB
+            stock = _cell(ws, r, 29, L)   # col AC
+            chemicals.append({
+                "item": item_s, "units": "T", "received": "",
+                "used":  _clean(str(used)) if used is not None else "",
+                "on_loc": _clean(str(stock)) if stock is not None else "",
             })
-        elif desc and activities:
-            # Continuation row — fold into previous op's description
-            prev = activities[-1]
-            prev["description"] = (prev["description"] + "\n" + desc).strip()
-
-    # Back-assign bill codes from the tarif daily totals via the shared helper
-    from helpers.bill_code_assign import assign_bill_codes
-    activities = assign_bill_codes(activities, tarif_totals)
 
     # =====================================================================
-    # MUD CHECKS (K9-L10, plus a few more rows)
+    # PERSONNEL — role labels (col Z) from the row after the chemicals
+    # TOTAL down to "TOTAL PERSON". Counts (if filled in) sit a few
+    # columns to the right; all blank on the sample report.
     # =====================================================================
-    mud_checks = {}
-    if mud_type and mud_type.upper() != "TYPE BOUE":
-        mud_checks["mud_type"] = mud_type
-
-    # K9=Densité label, L9=value
-    dens = _cell(ws, 9, 12, L)
-    if dens is not None: mud_checks["density"] = _float(dens)
-    # K10=Visc. March., L10
-    fv = _cell(ws, 10, 12, L)
-    if fv is not None: mud_checks["fun_vis"] = _float(fv)
-    # Yield at M9
-    yield_v = _cell(ws, 9, 13, L)
-    if yield_v is not None:
-        try:
-            v = _float(yield_v)
-            if v > 0: mud_checks["yp"] = v
-        except: pass
-    # PH at M10
-    ph = _cell(ws, 10, 13, L)
-    if ph is not None:
-        try:
-            v = _float(ph)
-            if v > 0: mud_checks["ph"] = v
-        except: pass
-
-    # =====================================================================
-    # MUD VOLUMES — Vol puits=N7, Vol surf=N8 (labels at M7, M8)
-    # =====================================================================
-    mud_volume = {}
-    vp = _cell(ws, 7, 14, L)
-    if vp is not None:
-        try: mud_volume["string_volume"] = _float(vp)
-        except: pass
-    vs = _cell(ws, 8, 14, L)
-    if vs is not None:
-        try: mud_volume["pits_volume"] = _float(vs)
-        except: pass
-    if mud_volume:
-        mud_volume["total_volume"] = sum(
-            v for v in (mud_volume.get("string_volume"), mud_volume.get("pits_volume"))
-            if isinstance(v, (int, float))
-        )
-
-    # =====================================================================
-    # MUD CHEMICAL USAGE (rows 18-32; K=item, L=units, M=used, N=stock)
-    # =====================================================================
-    chemicals = []
-    for row in range(18, 36):
-        item = _clean(_cell(ws, row, 11, L) or "")
-        if not item or item.upper() in ("PRODUITS", "PRODUITS SH DP OHT"):
-            continue
-        units = _clean(_cell(ws, row, 12, L) or "")
-        used  = _cell(ws, row, 13, L)
-        stock = _cell(ws, row, 14, L)
-        chemicals.append({
-            "item":     item,
-            "units":    units,
-            "received": "",
-            "used":     _clean(str(used)  if used  is not None else ""),
-            "on_loc":   _clean(str(stock) if stock is not None else ""),
-        })
-
-    # =====================================================================
-    # PERSONNEL (rows 28-34; col E label, col J count)
-    # The TOTAL row at the bottom is excluded.
-    # =====================================================================
-    personnel = []
-    for row in range(28, 36):
-        role = _clean(_cell(ws, row, 5, L) or "")
-        count = _cell(ws, row, 10, L)
-        if not role: continue
-        if role.upper().startswith("TOTAL"): continue
-        if "PERSONNEL" in role.upper(): continue
-        personnel.append({
-            "company": role,
-            "number":  _int(count, 0),
-            "hours":   "",
-            "names":   "",
-        })
-
-    # =====================================================================
-    # SUPERVISORS  (row 36-37 in cols K, M)
-    # Layout: K36 "Rep maître œuvre" label, M36 "Resp sce puits" label;
-    # K37 supervisor name, M37 second supervisor name.
-    # Per the two-supervisor convention, BOTH names land in the
-    # supervisor / superintendent slots.
-    # =====================================================================
-    sup1_label = _clean(_cell(ws, 36, 11, L) or "")
-    sup2_label = _clean(_cell(ws, 36, 13, L) or "")
-    sup1_name  = _clean(_cell(ws, 37, 11, L) or "")
-    sup2_name  = _clean(_cell(ws, 37, 13, L) or "")
-    if sup1_name and "MAÎTRE" in sup1_label.upper() or "MAITRE" in sup1_label.upper() or sup1_name:
-        # First supervisor → "supervisor"
-        if sup1_name and sup1_name.upper() not in ("REP MAÎTRE ŒUVRE", "REP MAITRE OEUVRE",
-                                                     "MAÎTRE D'ŒUVRE"):
-            header["supervisor"] = sup1_name
-    if sup2_name and sup2_name.upper() not in ("RESP SCE PUITS",):
-        # Second supervisor → "superintendent" slot (column-name misnomer,
-        # but per the convention these are both 12-hour shift supervisors).
-        header["superintendent"] = sup2_name
-
-    # =====================================================================
-    # TEXT SECTIONS (rows 37-40)
-    # SITUATION AU RAPPORT: ... at A37
-    # PROGRAMME PRÉVU: ...   at A38
-    # =====================================================================
-    text_sections = {}
-    sit = _cell(ws, 37, 1, L)
-    if sit:
-        v = _strip_label(str(sit), "SITUATION AU RAPPORT", "SITUATION")
-        if v:
-            # Cap at 300 chars to fit the frontend display limit
-            if len(v) > 300:
-                v = v[:300].rsplit(None, 1)[0] + "…"
-            text_sections["current_operation"] = v
-            text_sections["day_summary"]       = v
-
-    plan = _cell(ws, 38, 1, L)
-    if plan:
-        v = _strip_label(str(plan), "PROGRAMME PRÉVU", "PROGRAMME PREVU", "PROGRAMME")
-        if v:
-            text_sections["plan_operations"] = v
+    personnel: List[Dict[str, Any]] = []
+    total_pos = None
+    for r in range(40, 46):
+        v = _cell(ws, r, 26, L)
+        if v and _clean(str(v)).upper().startswith("TOTAL"):
+            total_pos = r; break
+    if total_pos:
+        for r in range(total_pos + 1, total_pos + 22):
+            label = _cell(ws, r, 26, L)  # col Z
+            if not label or not isinstance(label, str): continue
+            label_s = _clean(label)
+            if not label_s: continue
+            if label_s.upper().startswith("TOTAL PERSON"):
+                v = _value_right(ws, L, r, 26, max_scan=3, spans=S)
+                if v is not None and _is_value_like(v):
+                    header["personnel_total"] = _int(v)
+                break
+            v = _value_right(ws, L, r, 26, max_scan=3, spans=S)
+            n = _int(v) if (v is not None and _is_value_like(v)) else 0
+            personnel.append({"company": label_s, "number": n, "hours": "", "names": ""})
 
     wb.close()
-
-    # Track cost breakdown by company in a side dict (not used by current
-    # downstream, but available if you ever wire up per-vendor cost reporting)
-    cost_breakdown = {}
-    for row in range(13, 27):
-        co = _clean(_cell(ws, row, 5, L) or "") if False else None
-    # (skipped — we already closed wb above; leave hook for future expansion)
 
     return {
         "header": header,
         "activities": activities,
         "text_sections": text_sections,
         "mud_checks": mud_checks,
-        "mud_volume": mud_volume,
+        "mud_volume": {},
         "mud_chemical_usage": chemicals,
         "personnel_data": personnel,
         "pumps": [],
@@ -481,11 +532,13 @@ def parse_tp183(source: Union[Path, str, BytesIO]) -> dict:
         "survey_data": [],
         "safety": {},
         "tarif_totals": tarif_totals,
+        "tarif_cumul": {},
     }
 
 
 # Drop-in compat
 parse_daily_excel_report = parse_tp183
+parse_gw29 = parse_tp183
 
 
 if __name__ == "__main__":

@@ -443,8 +443,17 @@ def parse_entp204(source: Union[Path, str, BytesIO]) -> dict:
                 continue
 
             if in_after_midnight:
-                # Capture after-midnight description text (don't make it an op)
-                if desc:
+                # Capture after-midnight description text (don't make it an
+                # op). Some reports repeat the EXACT SAME description across
+                # several consecutive 0-hour rows, each just tagged with a
+                # different bill code (e.g. the same "WAITING REPAIR..." text
+                # on 5 rows with bill T3/T4/T1/T2/T3) — that's the source
+                # data's way of noting the wait applies across multiple
+                # tariff buckets, not 5 distinct things that happened.
+                # Appending every row's text unconditionally would duplicate
+                # that one description 5x and blow well past any downstream
+                # length limit — skip a description that's already present.
+                if desc and desc not in after_midnight_parts:
                     after_midnight_parts.append(desc)
                 continue
 
@@ -505,7 +514,7 @@ def parse_entp204(source: Union[Path, str, BytesIO]) -> dict:
     # timedelta value in the next cell).  Scan generically for either.
     # =====================================================================
     tarif_totals = {}
-    for r in range(100, 115):
+    for r in range(100, 125):
         row_has_code = any(
             re.match(r"^(T[1-4]|FT|NR)\s*=", _clean(_cell(ws, r, c, L) or ""))
             for c in range(2, 16)
