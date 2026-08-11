@@ -258,13 +258,18 @@ def _detect_format_xlsx(source) -> str:
     # — confirmed identical layout.
     # Must be checked BEFORE the generic TP-179 catch-all below since these
     # files all have "RAPPORT JOURNALIER" + "WORK".
-    if "RAPPORT JOURNALIER" in blob and ("AVANCEMENT" in blob
-                                         or "PARAMETRES" in blob
-                                         or re.search(r"\bGW\s?\d{2}\b", blob)
-                                         or "TP#127" in blob
-                                         or "TP-127" in blob
-                                         or "TP 127" in blob
-                                         or re.search(r"\bDAD[#\-\s]?\d", blob)):
+    # GW29 family: require stronger signals (AVANCEMENT plus at least one
+    # of the section headers) or explicit GW/TP-127 identifiers. This
+    # avoids matching generic "RAPPORT JOURNALIER" files (eg. TP-179)
+    # that may contain isolated words like "PARAMETRES".
+    if "RAPPORT JOURNALIER" in blob and (
+            ("AVANCEMENT" in blob and ("OUTILS" in blob or "USURE" in blob or "PARAMETRES" in blob))
+            or re.search(r"\bGW\s?\d{2}\b", blob)
+            or "TP#127" in blob
+            or "TP-127" in blob
+            or "TP 127" in blob
+            or re.search(r"\bDAD[#\-\s]?\d", blob)
+    ):
         return "gw29"
 
     # TP-173 — same template family as TP-179 (RAPPORT JOURNALIER DU WORK
